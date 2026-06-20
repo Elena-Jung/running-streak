@@ -1,0 +1,142 @@
+# 러닝 스트릭 봇 — 설계 및 동작 문서 (단일 진실원)
+
+> ⚠️ **이 문서는 이 프로젝트의 결정사항·동작 로직의 단일 진실원(source of truth)이다.**
+> 앞으로 코드/스키마/동작/명령어를 바꾸는 **모든 작업은 이 문서를 함께 갱신**해야 한다.
+> (관련: 1단계 명세 `RUNNING_STREAK_BOT_SPEC.md` = 맥북 `~/Documents/running-streak`. 본 문서는 2단계 구현의 진실원.)
+
+최종 갱신: 2026-06-21 (GitHub 공개: Elena-Jung/running-streak)
+
+---
+
+## 1. 개요
+개인 디스코드 서버의 **지정 채널**에 **등록된 사용자**가 러닝 기록 사진을 올리면, 봇이 자동 감지해
+**연속 러닝 일수(스트릭)** 를 기록하고 슬래시 커맨드로 조회·랭킹·집계를 제공한다.
+
+## 2. 운영 환경 / 배포
+- 호스트: **SRV-1** (Rocky Linux 9.7, x86_64). Claude Code 세션이 srv1에서 직접 구동(맥 개발→push 전제는 폐기).
+- 전부 컨테이너: `docker compose` 로 **bot**(`python:3.12-slim` + discord.py + Tesseract) + **db**(`postgres:16-alpine`).
+- 봇 전용 PG는 **호스트 포트 미발행**(내부 네트워크 `internal` 전용) → 호스트의 기존 PG(127.0.0.1:5432)와 충돌 없음.
+- 비밀값은 `.env`(gitignore). 슬래시 커맨드는 **길드 스코프 동기화**. 특권 intent는 **MESSAGE CONTENT만** 사용.
+- `restart: unless-stopped` → 재부팅 자동 복구. 데이터는 named volume `pgdata`.
+- 원격 저장소: https://github.com/Elena-Jung/running-streak (Public). `.env`·비밀·타인 데이터 미포함.
+- 운영: `docker compose up -d --build` / `logs -f bot` / `down`. 절차 상세는 `README.md`.
+
+## 3. 확정 결정사항 (불변 — 함부로 되돌리지 말 것; 명세 9/12.4.5)
+- **언어**: Python + discord.py. **OCR**: 로컬 Tesseract만(클라우드 OCR/비전 LLM 금지).
+- **날짜 기준**: 메시지 업로드 시각을 **KST(Asia/Seoul) 날짜**로 환산. 사진 속/OCR 날짜는 쓰지 않는다.
+- **유예(grace)**: 마지막 러닝 이후 **간격 ≤ 3일 유지, ≥ 4일 리셋**. **실제 뛴 날만** 카운트(유예일 미카운트).
+- **하루 1회**: 같은 날 여러 번 올려도 1회만 집계.
+- **조회는 읽기 전용**: 저장값을 바꾸지 않고, 표시 때만 `today−last_run`으로 유효성 보정(유령 스트릭 방지).
+- **스케줄러/백그라운드 작업 금지**: 모든 계산은 *사진 이벤트* 또는 *조회 시점*에만.
+- **구현 금지**: 위기 알림, 주간/월간 리포트 자동 게시, 그래프 생성, 목표·배지, 대규모 확장 설계.
+- **OCR은 부가정보**: 실패해도 스트릭에 영향 없음. 신뢰도 낮아 **채널 미노출**, `run_logs`에만 저장.
+
+## 4. 데이터 모델 (PostgreSQL)
+`runners` — 사람당 스트릭 상태(O(1) 조회용 캐시):
+| 컬럼 | 의미 |
+|---|---|
+| `user_id` (PK) | 디스코드 사용자 ID |
+| `registered` | 등록(옵트인) 여부. 해제 시 FALSE(기록 보존) |
+| `last_run_date` | 마지막으로 뛴 날(KST date) |
+| `current_streak` | 마지막 뛴 날 기준 연속 일수 |
+| `max_streak` | 역대 최장 |
+| `total_runs` | 총 뛴 날 수 |
+
+`run_logs` — **'뛴 날 1행' 원장(source of truth)**. 취소/재계산의 근거이자 `/기록`·이번달 집계원:
+| 컬럼 | 의미 |
+|---|---|
+| `id` (PK) | |
+| `user_id`, `run_date` | **UNIQUE(`run_logs_user_day_uq`)** → 하루 1행 강제 |
+| `distance_km` NUMERIC | OCR 거리(소수만 인정) |
+| `duration_sec` INT | OCR 운동시간(초) |
+| `pace_sec_per_km` INT | OCR 페이스(초/km) |
+| `calories` INT | OCR 칼로리 |
+| `raw_text` TEXT | OCR 원문 |
+
+> 불변식: `runners`의 (current_streak, max_streak, last_run_date, total_runs)는 `run_logs`의 run_date 집합으로부터
+> `streak.recompute_from_dates()`로 **재계산 가능**해야 한다. 취소는 이 재계산을 사용한다.
+
+## 5. 동작 로직
+### 5.1 사진 업로드 집계 — `events.handle_message` ([bot/app/events.py](bot/app/events.py))
+1. 봇/다른봇/DM 무시 → 채널이 `TARGET_CHANNEL_ID` 아니면 무시 → 이미지 첨부 없으면 무시 → 미등록자 무시.
+2. `today = KST(message.created_at)`. `record = load(user)`.
+3. `new_streak, counted = compute_on_run(last_run, cur, today)` (순수 함수).
+4. `counted=False`(gap 0 또는 음수)면 **무음 종료**(반응도 없음).
+5. **즉시 ✅ 반응**(느린 OCR 전에 접수 표시, '반응 추가하기' 권한 없으면 무시).
+6. OCR best-effort(`ocr.try_extract`, 예외 전부 흡수) → `record_run`(트랜잭션: run_logs INSERT + runners UPDATE).
+   - `record_run`이 `False`(같은 날 유니크 충돌=동시 업로드 경합) 반환 시 **무음 종료**(중복 집계 방지).
+7. 채널에 `### 오늘의 러닝 완료! N일째 연속!` + 업로더 멘션 전송.
+   - **소프트 힌트**: OCR 4필드를 모두 못 읽었으면(엉뚱한 이미지 가능성) 메시지 끝에 `/달리기 취소` 안내를 subtext로 덧붙인다. **집계는 막지 않는다**(명세 2: OCR이 스트릭을 좌우하지 않음). 사진형 정상 러닝(신발·워치·트레드밀·해외앱)도 OCR이 비기 쉬워 게이트/확인은 두지 않기로 결정.
+
+### 5.2 스트릭 규칙 — `streak.compute_on_run` ([bot/app/streak.py](bot/app/streak.py))
+- `last_run is None` → `(1, True)` (첫 러닝).
+- `gap = (today − last_run).days`. `gap ≤ 0` → `(current, False)`(오늘 이미/시계이상, 무시).
+- `1 ≤ gap ≤ 3`(GRACE_MAX_GAP=3) → `(current+1, True)`. `gap ≥ 4` → `(1, True)`(리셋).
+
+### 5.3 조회(읽기 전용) — `streak.effective_streak`
+- `gap > 3` → `0`(유령 스트릭 차단), 아니면 저장된 current. **저장값 변경 없음.**
+
+### 5.4 취소/재계산 — `db.undo_last_run` + `streak.recompute_from_dates`
+- `/달리기 취소`: 본인 최근 `run_logs` 1건 삭제 후 남은 run_date 집합으로 스트릭 전부 재계산(트랜잭션). 등록은 유지.
+- `recompute_from_dates(dates)`: 정렬·중복제거 후 동일 유예 규칙으로 (current, max, last, total) 산출.
+
+### 5.5 OCR 부가정보 — [bot/app/ocr.py](bot/app/ocr.py)
+- 전처리(가벼움): 흑백+업스케일+autocontrast(변형 A), **밝은 글씨 이진화**(변형 B, 사진 위 흰 거리 글씨용), **원본 컬러**(변형 C, 분홍 칼로리 등 컬러 글씨가 흑백/이진화에서 깨지는 것 보완). 각 변형 PSM 6/11 시도 후 텍스트 합쳐 파싱.
+- 거리: 단위 인접 정규식 → 폴백(독립 소수, 시간/페이스/칼로리/`/km` 제외). **정수 단독 제외**(소수만 인정), **`km/h`(평균 속도)는 거리로 잡지 않음**(메인·폴백 모두).
+- 칼로리: 상한 20000(OCR 노이즈 컷). 거리/속도 혼동 방지는 `test_ocr.py`로 회귀 보호.
+- 시간: `HH:MM:SS`/`MM:SS`, **상태바 시계 줄(KT/%/AM 등) 제외**, **뒤에 `/km` 붙은 페이스는 제외**, 후 최장 후보.
+- 페이스: `분'초"`(6'00") 우선, 없으면 **콜론형 `5:30/km`**(`/km` 필수). 120~1800초/km. 칼로리: `N kcal`/`칼로리` 양방향, 상한 20000.
+- 이미지 25MB 초과 시 OCR 생략(집계는 정상). 입력 포맷: PNG/JPG/WEBP/GIF/BMP(HEIC 제외).
+- DB 접속 DSN은 유저/비번을 URL 인코딩(특수문자 비번도 안전).
+
+## 6. 명령어 ([bot/app/commands.py](bot/app/commands.py)) — 길드 동기화 top-level 5개
+| 명령 | 동작 | 노출 |
+|---|---|---|
+| `/달리기 등록` | 선수 등록(옵트인) | 본인만 |
+| `/달리기 해제` | 등록 취소(기록 보존) | 본인만 |
+| `/달리기 취소` | 내 최근 기록 1건 되돌리기 | 본인만 |
+| `/스트릭` | 내 러닝 기록 통합: 연속·최장·이번 달 + 누적 거리·시간·페이스·칼로리 | 본인만 |
+| `/기록` | `/스트릭`과 동일(별칭, 같은 출력) | 본인만 |
+| `/리더보드` | 등록 선수 스트릭 랭킹 + 각자 누적 거리(있을 때) | 공개(멘션 비활성) |
+| `/도움` | 사용설명서(HELP_TEXT) | 본인만 |
+| (자동) | 등록자가 지정 채널에 이미지 업로드 시 집계+응답 | 공개 |
+
+## 7. 무결성 안전장치 & 점검 결과
+- **동시 업로드 경합**: 같은 날 두 장 동시 업로드 → `run_logs` UNIQUE(user,date)로 두 번째 INSERT 충돌 → `record_run`이 False 반환 → 중복 집계/응답 차단. (라이브 동시성 테스트 통과: 정확히 하나만 성공.)
+- **일관성**: `record_run`/`undo_last_run` 모두 트랜잭션 → runners·run_logs 동시 갱신/롤백.
+- **유령 스트릭**: 조회 시 `effective_streak`로 보정, 저장값 불변.
+- **OCR 격리**: 모든 OCR 경로 예외 흡수, 실패해도 스트릭 무영향. 거리 오인식(정수 노이즈)은 가드로 차단.
+- **시계/역전 방어**: `gap ≤ 0`이면 무시.
+- **권한 의존**: 봇이 대상 채널에서 *보기/보내기/기록보기* 권한 없으면 동작 안 함(운영 메모).
+
+## 8. 알려진 한계
+- OCR은 앱/화면 레이아웃에 의존 → 일부 필드 미인식 가능(부가정보 한정, 스트릭 무관).
+- **HEIC/HEIF 미지원**: Pillow에 pillow-heif 미설치라 아이폰 HEIC 이미지는 OCR 불가(러닝 집계는 정상, 4정보만 빈 값 → 소프트 힌트). 사용자는 주로 폰 *스크린샷*(PNG/JPG)을 올리므로 당장 필요성 낮다고 판단해 보류(필요 시 `pillow-heif` 추가). 〔2026-06-20 기록〕
+- **운동시간 OCR이 스크린샷 속 날짜·시각에 오염될 여지**: 화면의 `YYYY.MM.DD HH:MM` 의 `HH:MM` 이 *짧은* 러닝의 운동시간보다 크면 잘못 잡힐 수 있음(긴 러닝은 무관). 보류 중(검토 예정).
+- 표시 이름은 `fetch_user` 기반(서버 닉네임 캐시 없으면 글로벌 이름). members intent 미사용.
+- 채널 전송 권한이 없으면 집계는 되지만 안내 메시지는 생략(로그만).
+- OCR 성능: 이미지당 Tesseract 최대 6회(전처리 3종 × PSM 2종). **정확도 우선으로 조기종료는 의도적으로 두지 않음**(지연은 ✅ 즉시 반응으로 완충).
+- DB 백업 없음(운영 시 `pg_dump` 권장). 컨테이너 로그 로테이션 미설정(권장).
+
+## 9. 검증 방법
+- 단위 테스트: `docker compose run --rm bot python -m pytest -q` (현재 34건: 스트릭 경계·재계산·OCR 파싱).
+- 동시성/되돌리기: 가짜 user_id로 `record_run`/`undo_last_run`/race 스크립트 검증(일회성).
+- DB: `docker compose exec db psql … -c '\d run_logs'`(컬럼·인덱스), 집계 SQL 확인.
+- E2E: 디스코드에서 `/달리기 등록` → 이미지 업로드 → 응답 → `/스트릭`·`/기록`·`/리더보드`·`/도움`.
+
+## 10. 변경 이력 (요약)
+- 초기 구현(2단계): 스트릭 로직·DB·슬래시 커맨드·compose·OCR.
+- members intent 제거(MESSAGE CONTENT만), OCR 채널 미노출.
+- OCR 거리 개선(전처리/2단 레이아웃 폴백) → 4필드(거리·시간·페이스·칼로리) 분리 집계.
+- 거리 정수 노이즈 가드 + 완료 메시지 업로더 멘션.
+- `/기록`(누적 집계) 추가.
+- `/달리기 취소`(원장 재계산 되돌리기) 추가 + `record_run` 트랜잭션화.
+- `/도움`(사용설명서) 추가, `run_logs` 하루1행 UNIQUE 제약(동시 업로드 경합 방어), 본 문서 신설.
+- OCR 4필드 전부 실패 시 완료 메시지에 소프트 힌트(`/달리기 취소` 안내) 추가 — 집계는 막지 않음.
+- 집계되는 이미지에 즉시 ✅ 반응(느린 OCR 전 접수 표시). 봇에 '반응 추가하기' 권한 필요.
+- /리더보드에 각자 누적 거리(`db.distance_totals`, 있을 때만) 한 항목 추가. (/스트릭은 스트릭 중심 유지, 4정보는 /기록)
+- 버그수정: `km/h`(평균 속도)를 거리로 오인하던 문제 수정 + 칼로리 상한 + `test_ocr.py`(10건) 추가.
+- 다방면 무결성 점검: 동시성·정합성·OCR 함정·깨진입력 검증 통과. 콜론형 페이스(`5:30/km`) 인식 + 운동시간 오염 차단, 이미지 25MB OCR 가드, DSN 유저/비번 URL 인코딩. 테스트 34건. HEIC 미지원·운동시간 날짜오염은 한계로 기록(보류).
+- 삼성헬스 칼로리 인식 보강: 긴 합성 스크린샷에서 분홍색 칼로리 글씨가 흑백/이진화 시 숫자에 단위가 붙어 깨지던 문제 → **원본 컬러 변형(C)** 추가로 단위까지 깨끗이 읽음. 실제 이미지로 검증, 거리·시간·페이스 무퇴행.
+- 봇 사용자 문구를 전부 격식체(합니다체)로 통일, `-요` 종결 제거(완료 메시지·명령 응답·HELP_TEXT·disclaimer).
+- GitHub 공개(Public): `Elena-Jung/running-streak`. 테스트 픽스처를 합성 값으로 교체(타인 러닝 데이터 제거), `.gitignore` 강화.

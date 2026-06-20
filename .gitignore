@@ -1,0 +1,38 @@
+# ── 비밀값 (절대 커밋 금지) ──────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ── 실험/임시 산출물 (테스트 스크립트·이미지 등) ──────
+probe*.py
+identify.py
+*.tmp
+*.bak
+
+# ── 러닝 스크린샷 등 이미지가 실수로 들어가지 않게 ────
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.heic
+*.heif
+*.gif
+*.bmp
+
+# ── Python ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# ── OS / 에디터 ─────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
