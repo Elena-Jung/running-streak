@@ -209,19 +209,11 @@ def test_current_run_date_matches_to_run_date():
     assert events.current_run_date() == events.to_run_date(datetime.now(timezone.utc))
 
 
-def test_dawn_upload_completion_notes_previous_day():
-    # 새벽(02:00 KST) 업로드 → 전날(06-24)로 집계되므로 완료 메시지에 안내가 붙어야 함.
+def test_completion_message_omits_boundary_note():
+    # 완료 메시지는 04시 경계 안내를 포함하지 않는다(그 설명은 /스트릭·/캘린더로 이동).
+    # 새벽(02:00 KST) 업로드여도 '전날' 안내가 붙지 않아야 함.
     m = _img_msg()
     m.created_at = _kst(2026, 6, 25, 2, 0)
-    db = FakeDB(record=None, rr=(True, 1))
-    _run(m, db, _cfg())
-    assert m.channel.sent and "전날" in m.channel.sent[0] and "6/24" in m.channel.sent[0]
-
-
-def test_daytime_upload_completion_has_no_dawn_note():
-    # 정오(12:00 KST) 업로드 → 당일 집계. 새벽 안내가 붙지 않아야 함.
-    m = _img_msg()
-    m.created_at = _kst(2026, 6, 25, 12, 0)
     db = FakeDB(record=None, rr=(True, 1))
     _run(m, db, _cfg())
     assert m.channel.sent and "전날" not in m.channel.sent[0] and "1일째 연속" in m.channel.sent[0]

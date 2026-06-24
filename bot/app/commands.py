@@ -195,6 +195,10 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
                 f"-# OCR 인식 기준 — 거리 {s.get('dist_n') or 0}/{runs}, "
                 f"칼로리 {s.get('cal_n') or 0}/{runs}회"
             )
+        # 하루 경계(04시) 안내 — 새벽 러닝이 전날로 잡히는 이유를 여기서 알린다(완료 메시지엔 미표시).
+        lines.append(
+            "-# 🕓 하루 경계는 새벽 4시입니다 — 0시~새벽 4시 러닝은 전날로 집계됩니다."
+        )
         # 부가정보 정확도 disclaimer (스트릭은 무관함을 함께 안내)
         lines.append(
             "-# ⚠️ 거리·시간·페이스·칼로리는 사진 자동 인식(OCR) 값이라 정확하지 않을 수 있습니다. "
@@ -302,6 +306,7 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
             f"## 📅 {year}년 {m}월 러닝 달력",
             f"```\n{cal_text}\n```",
             "`*` = 달린 날",
+            "-# 🕓 하루 경계는 새벽 4시 — 0시~새벽 4시 러닝은 전날 날짜로 집계됩니다.",
             f"📊 {m}월 합계: {mcnt}회 · {mdist:.1f}km · {_fmt_duration(mdur)} · {mcal}kcal",
         ]
         if year == today.year and m == today.month:  # 현재 달일 때만 '이번 주(월~일)' 합계

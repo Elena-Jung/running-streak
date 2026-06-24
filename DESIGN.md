@@ -67,8 +67,8 @@
 5. OCR best-effort — **`asyncio.to_thread`로 워커 스레드 오프로드 + Semaphore(2)로 동시 수 제한** → 이벤트 루프·하트비트·다른 커맨드를 막지 않는다.
 6. `record_run(...)` → `(recorded, current_streak)`. 트랜잭션 안에서 `SELECT … FOR UPDATE`로 같은 사용자를 직렬화하고 run_logs INSERT 후 **원장 전체 재계산**으로 runners 갱신.
    - `recorded=False`(같은 날 유니크 충돌) → **무음 종료**. record_run 이 예외면 ✅를 ⚠️로 바꿔 **거짓 접수 방지**.
-7. 채널에 `### 러닝 기록 완료. N일째 연속입니다.` + 업로더 멘션 전송.
-   - **새벽(00:00~03:59 KST) 업로드**일 때만 `전날(M/D) 기록으로 집계` 안내를 subtext로 덧붙여 '오늘' 오인을 막는다(낮 시간대는 간결 유지).
+7. 채널에 `### 러닝 기록 완료. N일째 연속입니다.` + 업로더 멘션 전송. **완료 메시지는 매번 간결하게**(04시 경계 안내는 넣지 않음).
+   - 04시 경계(새벽 러닝=전날) 설명은 **`/스트릭`·`/캘린더` 출력의 subtext로 이동**(매 업로드마다 노출하지 않기로 결정, 2026-06-25).
    - **소프트 힌트**: OCR 4필드를 모두 못 읽었으면(엉뚱한 이미지 가능성) 메시지 끝에 `/달리기 취소` 안내를 subtext로 덧붙인다. **집계는 막지 않는다**(명세 2: OCR이 스트릭을 좌우하지 않음). 사진형 정상 러닝(신발·워치·트레드밀·해외앱)도 OCR이 비기 쉬워 게이트/확인은 두지 않기로 결정.
 
 ### 5.2 스트릭 규칙 — `streak.compute_on_run` ([bot/app/streak.py](bot/app/streak.py))
@@ -135,7 +135,7 @@
 - DB 백업 없음(운영 시 `pg_dump` 권장). [반영됨] asyncpg `command_timeout=15`, compose 로그 로테이션(10m×3)·`mem_limit`(bot 1g/db 512m)·POSTGRES_* 필수 마커.
 
 ## 9. 검증 방법
-- 단위 테스트: `docker compose run --rm bot python -m pytest -q` (현재 65건: 스트릭·재계산·OCR·차트·config·이벤트핸들러·04시 경계·새벽 안내).
+- 단위 테스트: `docker compose run --rm bot python -m pytest -q` (현재 64건: 스트릭·재계산·OCR·차트·config·이벤트핸들러·04시 경계).
   · **주의**: 소스는 빌드 시 `COPY`(볼륨 마운트 없음) → 코드 변경 후 반드시 `docker compose build bot` 후 테스트/재기동.
 - 동시성/되돌리기: 가짜 user_id로 `record_run`/`undo_last_run`/race 스크립트 검증(일회성).
 - DB: `docker compose exec db psql … -c '\d run_logs'`(컬럼·인덱스), 집계 SQL 확인.
@@ -163,3 +163,4 @@
 - 전처리를 적응형(국소) 이진화로 교체(고정 크롭·임계값 제거) → 화면크기·앱·비율에 견고. 라벨 기반 텍스트 추출 + 거리 유도가 핵심, 2단 칼로리만 라벨-크기-상대 좌표 폴백.
 - 전체 QA(126 에이전트) 반영: record_run/undo 를 FOR UPDATE+원장 재계산으로 일원화(TOCTOU·재등록부활·UPDATE0행 해소), OCR 워커스레드 오프로드(DoS 방지)+Semaphore, 조회/취소 커맨드 defer + tree.error 전역핸들러, record_run 실패 시 ✅→⚠️, UNIQUE 마이그레이션 중복정리, 월 조회 범위쿼리(인덱스), 칼로리 다중매치, PIL 픽셀 상한, config 비밀 repr 제외·포트 검증, compose 로그로테이션·mem_limit·필수마커, requirements 고정. 테스트 44→58(config·events 추가). 문서 메시지 문구 통일.
 - **러닝 하루 경계를 KST 자정→04:00 으로 이동**(하절기 새벽 러닝=전날 집계). `to_kst_date`→`to_run_date`(KST 변환 후 4시간 빼고 .date()), `current_run_date()` 도입으로 기록·조회가 동일 논리날짜 기준 사용. 완료 메시지에서 '오늘' 제거 + 새벽 업로드 전날집계 안내, HELP_TEXT·README 04시 규칙 명시, /스트릭 끊김 힌트 '오늘'→'지금'. 과거 데이터 소급 미적용(전진 적용). 다방면 QA(19 에이전트, 14건→10 확정 전부 문서/UX, 코드 정합성·무마이그레이션·UNIQUE는 정상 확인). 테스트 58→65(04시 경계·새벽 안내). 전환 영향 새벽기록 1건 수동 정정(공개 레포엔 식별정보 미기재).
+- 완료 메시지의 새벽(전날 집계) 안내 제거 → **`/스트릭`·`/캘린더`의 subtext로 이동**(매 업로드 노출 대신 조회 화면에서 안내). 테스트 65→64.

@@ -157,14 +157,8 @@ async def handle_message(
     hint = ""
     if config.ocr_enabled and not any(v is not None for v in fields.values()):
         hint = "\n-# 러닝 정보를 읽지 못했습니다. 잘못 올린 경우 `/달리기 취소` 로 되돌릴 수 있습니다."
-    # 새벽(00:00~03:59 KST) 업로드는 04시 리셋으로 '전날'에 집계된다. 그 시간대에만 안내를 덧붙여
-    # '오늘'이라는 오해를 막는다(낮 시간대는 기존처럼 간결하게 둔다 — today 가 곧 달력상 오늘).
-    created = message.created_at
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    day_note = ""
-    if created.astimezone(KST).hour < DAY_RESET_HOUR:
-        day_note = f"\n-# 새벽 러닝은 전날({today.month}/{today.day}) 기록으로 집계됩니다(하루 경계 오전 4시)."
+    # 완료 메시지는 간결하게 유지한다. 04시 경계(새벽 러닝=전날) 설명은 매번 띄우지 않고
+    # /스트릭·/캘린더 안내로 옮겼다(사용자 결정 2026-06-25).
     await message.channel.send(
-        f"### 러닝 기록 완료. {new_streak}일째 연속입니다.\n{message.author.mention}{day_note}{hint}"
+        f"### 러닝 기록 완료. {new_streak}일째 연속입니다.\n{message.author.mention}{hint}"
     )
