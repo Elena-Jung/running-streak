@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# 민감정보가 본문에 섞여 실수로 커밋되는 것을 막는 2차 방어 가드.
+# (.env 류 파일 자체는 .gitignore 가 차단 — 이 훅은 '내용'에 섞여 들어오는 경우용)
+# 활성화: git config core.hooksPath .githooks
+# 우회(의도된 내용일 때): git commit --no-verify
+set -u
+
+# 오탐이 낮은 고가치 패턴만(ERE, 대소문자 무시).
+patterns=(
+  '192\.168\.[0-9]'                                              # 사설 LAN 대역
+  'PasswordAuthentication[[:space:]]+(no|yes)'                   # SSH 서버 설정
+  '-----BEGIN[[:space:]].*PRIVATE KEY-----'                      # 개인키
+  '[MNO][A-Za-z0-9_-]{23}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27}' # 디스코드 봇 토큰 형태
+)
+
+status=0
+# 스테이징된(추가/수정) 파일의 '추가된 줄'만 검사. 훅 자신(.githooks/)은 자기매칭 방지로 제외.
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  case "$f" in .githooks/*) continue ;; esac
+  added=$(git diff --cached -U0 -- "$f" | grep -E '^\+' | grep -Ev '^\+\+\+')
+  [ -z "$added" ] && continue
+  for p in "${patterns[@]}"; do
+    if printf '%s\n' "$added" | grep -Eiq -- "$p"; then
+      echo "✋ 커밋 차단: '$f' 에 민감 패턴 추정 내용이 있습니다 (/$p/)."
+      status=1
+    fi
+  done
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+if [ "$status" -ne 0 ]; then
+  echo "→ 의도된 내용이면 'git commit --no-verify' 로 우회할 수 있습니다."
+fi
+exit "$status"
