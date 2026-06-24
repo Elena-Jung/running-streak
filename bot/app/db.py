@@ -30,7 +30,6 @@ CREATE TABLE IF NOT EXISTS run_logs (
     user_id     BIGINT NOT NULL,
     run_date    DATE   NOT NULL,
     distance_km NUMERIC,
-    raw_text    TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS run_logs_user_date_idx ON run_logs (user_id, run_date);
@@ -39,6 +38,10 @@ CREATE INDEX IF NOT EXISTS run_logs_user_date_idx ON run_logs (user_id, run_date
 ALTER TABLE run_logs ADD COLUMN IF NOT EXISTS duration_sec    INTEGER;
 ALTER TABLE run_logs ADD COLUMN IF NOT EXISTS pace_sec_per_km INTEGER;
 ALTER TABLE run_logs ADD COLUMN IF NOT EXISTS calories        INTEGER;
+
+-- 데이터 최소화: raw_text(OCR 원문 전문)는 어떤 조회에도 쓰이지 않으면서 타인 식별정보가 섞일 수
+-- 있어 보관 위험만 있다 → 컬럼째 제거(기존 행의 원문도 함께 사라짐). 집계 4필드는 별도 컬럼이라 무영향.
+ALTER TABLE run_logs DROP COLUMN IF EXISTS raw_text;
 
 -- 하루 1회 불변식 도입 전, 기존 같은 (user_id, run_date) 중복이 있으면 최신 id만 남기고 제거
 -- (그렇지 않으면 아래 UNIQUE INDEX 생성이 실패해 connect() 가 죽는다 — 진짜 멱등 보장).
@@ -116,6 +119,25 @@ class Database:
         )
         return bool(val)
 
+    async def purge_user(self, user_id: int) -> tuple[int, bool]:
+        """본인 데이터 **전체 삭제**(개인정보 삭제권). run_logs 전부 + runners 행 제거.
+
+        record_run/undo 와 동일하게 runners 행을 `FOR UPDATE` 로 직렬화한 뒤 삭제(동시 기록 경합 방지).
+        Returns: (삭제된 run_logs 건수, runners 행 삭제 여부).
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT 1 FROM runners WHERE user_id = $1 FOR UPDATE", user_id
+                )
+                deleted = await conn.fetch(
+                    "DELETE FROM run_logs WHERE user_id = $1 RETURNING id", user_id
+                )
+                row = await conn.fetchrow(
+                    "DELETE FROM runners WHERE user_id = $1 RETURNING user_id", user_id
+                )
+                return len(deleted), row is not None
+
     # --- 스트릭 데이터 ------------------------------------------------------
 
     async def load(self, user_id: int) -> Runner | None:
@@ -133,7 +155,6 @@ class Database:
         duration_sec: int | None = None,
         pace_sec_per_km: int | None = None,
         calories: int | None = None,
-        raw_text: str | None = None,
     ) -> tuple[bool, int]:
         """실제 뛴 날 1건 반영 (명세 7.1·7.3). runners 를 run_logs 원장으로부터 **재계산**한다.
 
@@ -156,8 +177,8 @@ class Database:
                     await conn.execute(
                         """
                         INSERT INTO run_logs
-                            (user_id, run_date, distance_km, duration_sec, pace_sec_per_km, calories, raw_text)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            (user_id, run_date, distance_km, duration_sec, pace_sec_per_km, calories)
+                        VALUES ($1, $2, $3, $4, $5, $6)
                         """,
                         user_id,
                         run_date,
@@ -165,7 +186,6 @@ class Database:
                         duration_sec,
                         pace_sec_per_km,
                         calories,
-                        raw_text,
                     )
                     rows = await conn.fetch(
                         "SELECT run_date FROM run_logs WHERE user_id = $1", user_id

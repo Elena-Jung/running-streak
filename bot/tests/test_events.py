@@ -7,9 +7,19 @@ import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
+import pytest
+
 from app import events
 from app.config import Config
 from app.db import Runner
+
+
+@pytest.fixture(autouse=True)
+def _reset_cooldown():
+    """사용자별 쿨다운 상태(모듈 전역)를 테스트마다 초기화 — 테스트 간 오염 방지."""
+    events._LAST_HANDLED.clear()
+    yield
+    events._LAST_HANDLED.clear()
 
 
 # --- 페이크 ----------------------------------------------------------------
@@ -86,10 +96,10 @@ class FakeDB:
 TARGET = 555
 
 
-def _cfg(ocr=False):
+def _cfg(ocr=False, paused=False):
     return Config(discord_token="t", guild_id=1, target_channel_id=TARGET,
                   pg_host="db", pg_port=5432, pg_user="u", pg_password="p",
-                  pg_db="d", ocr_enabled=ocr)
+                  pg_db="d", ocr_enabled=ocr, paused=paused)
 
 
 def _run(msg, db, cfg):
@@ -153,8 +163,9 @@ def test_record_run_conflict_no_message():
     m = _img_msg()
     db = FakeDB(record=None, rr=(False, 0))
     _run(m, db, _cfg())
-    assert "✅" in m.reactions
-    assert m.channel.sent == []  # 동시 업로드 경합 → 무음
+    assert "✅" in m.reactions       # 접수 표시는 달렸다가
+    assert "✅" in m.removed         # 거부되어 제거됨(거짓 접수 방지)
+    assert m.channel.sent == []      # 동시 업로드 경합 → 무음
 
 
 def test_record_run_failure_marks_warning():
@@ -217,3 +228,34 @@ def test_completion_message_omits_boundary_note():
     db = FakeDB(record=None, rr=(True, 1))
     _run(m, db, _cfg())
     assert m.channel.sent and "전날" not in m.channel.sent[0] and "1일째 연속" in m.channel.sent[0]
+
+
+# --- 운영 안전: 킬스위치·쿨다운·OCR 미시도 힌트 ----------------------------
+
+def test_paused_skips_aggregation():
+    # BOT_PAUSED(킬스위치) → 집계 즉시 중단(반응·메시지·기록 모두 없음).
+    m = _img_msg()
+    db = FakeDB(record=None, rr=(True, 1))
+    _run(m, db, _cfg(paused=True))
+    assert m.reactions == [] and m.channel.sent == [] and db.record_run_calls == []
+
+
+def test_cooldown_skips_rapid_second_upload():
+    # 같은 사용자의 연속 업로드: 두 번째는 쿨다운으로 스킵(자원 독점 방지).
+    db = FakeDB(record=None, rr=(True, 1))
+    m1 = _img_msg()
+    _run(m1, db, _cfg())
+    m2 = _img_msg()
+    _run(m2, db, _cfg())
+    assert len(db.record_run_calls) == 1          # 두 번째는 처리 안 됨
+    assert m2.reactions == [] and m2.channel.sent == []
+
+
+def test_oversize_image_no_ocr_hint():
+    # 25MB 초과 → OCR '시도조차' 안 함 → '정보 못 읽음' 힌트가 붙으면 안 됨(집계는 정상).
+    big = FakeAttachment(size=30 * 1024 * 1024)
+    m = FakeMessage(channel_id=TARGET, attachments=[big])
+    db = FakeDB(record=None, rr=(True, 1))
+    _run(m, db, _cfg(ocr=True))
+    assert m.channel.sent and "1일째 연속" in m.channel.sent[0]
+    assert "읽지 못했습니다" not in m.channel.sent[0]

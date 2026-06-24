@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -36,6 +37,14 @@ _MAX_OCR_IMAGE_BYTES = 25 * 1024 * 1024
 # 워커 스레드 수를 묶어 호스트를 보호한다(이벤트 루프는 to_thread 로 비차단).
 _OCR_SEMAPHORE = asyncio.Semaphore(2)
 
+# 다운로드+OCR 전체를 묶는 입장 세마포어. att.read()(최대 25MB)가 OCR 세마포어 '이전'이라,
+# 이게 없으면 동시 업로드가 각자 최대 25MB 를 메모리에 들고 대기 → OOM 여지. 동시 무거운 처리 수 상한.
+_HEAVY_SEMAPHORE = asyncio.Semaphore(4)
+
+# 사용자별 처리 쿨다운(초)과 마지막 처리 시각. 한 사람의 연속 업로드 폭주가 자원을 독점하지 못하게.
+_USER_COOLDOWN_SEC = 3.0
+_LAST_HANDLED: dict[int, float] = {}
+
 
 async def _run_ocr(image_bytes: bytes):
     """OCR 을 워커 스레드에서 실행(이벤트 루프 비차단) + 동시 실행 수 제한."""
@@ -43,6 +52,18 @@ async def _run_ocr(image_bytes: bytes):
 
     async with _OCR_SEMAPHORE:
         return await asyncio.to_thread(ocr.try_extract, image_bytes)
+
+
+async def _swap_reaction(message, *, remove: str | None = None, add: str | None = None) -> None:
+    """봇 '자신의' 리액션을 제거/추가한다. 자기 리액션이라 Manage Messages 권한이 필요 없다. 실패는 무시."""
+    try:
+        me = message.guild.me if message.guild else None
+        if remove and me is not None:
+            await message.remove_reaction(remove, me)
+        if add:
+            await message.add_reaction(add)
+    except Exception as e:  # noqa: BLE001
+        log.warning("리액션 교체 실패(무시): %s", e)
 
 
 def _has_image(message: discord.Message) -> bool:
@@ -96,6 +117,9 @@ async def handle_message(
         return
     if message.channel.id != config.target_channel_id:
         return
+    # 1.5) 킬스위치/유지보수 모드: 집계 즉시 중단(조회 커맨드는 영향 없음).
+    if config.paused:
+        return
     # 2) 이미지 첨부 없으면 무시.
     if not _has_image(message):
         return
@@ -104,6 +128,13 @@ async def handle_message(
         return
 
     user_id = message.author.id
+    # 3.5) 사용자별 쿨다운: 폭주(연속 업로드)로 다운로드·OCR 자원을 독점하지 못하게 최소 간격.
+    now_mono = time.monotonic()
+    last = _LAST_HANDLED.get(user_id)
+    if last is not None and now_mono - last < _USER_COOLDOWN_SEC:
+        return
+    _LAST_HANDLED[user_id] = now_mono
+
     today = to_run_date(message.created_at)
 
     record = await db.load(user_id)
@@ -121,41 +152,38 @@ async def handle_message(
     except Exception as e:  # noqa: BLE001
         log.warning("리액션 추가 실패(무시): %s", e)
 
-    # 4) OCR 부가정보 — 워커 스레드로 오프로드(이벤트 루프·하트비트 비차단) + 동시 수 제한.
+    # 4) OCR 부가정보 — 다운로드+OCR 를 입장 세마포어로 묶어 동시 메모리 상한(OOM 방지),
+    #    OCR 자체는 워커 스레드로 오프로드(이벤트 루프·하트비트 비차단). raw_text 는 저장하지 않는다(데이터 최소화).
     fields: dict = {}
-    raw_text = None
+    ocr_attempted = False
     if config.ocr_enabled:
         att = _first_image(message)
         if att is not None and (att.size or 0) <= _MAX_OCR_IMAGE_BYTES:
             try:
-                image_bytes = await att.read()
-                fields, raw_text = await _run_ocr(image_bytes)
+                async with _HEAVY_SEMAPHORE:
+                    image_bytes = await att.read()
+                    fields, _ = await _run_ocr(image_bytes)
+                ocr_attempted = True
             except Exception as e:  # noqa: BLE001 — 부가정보 실패는 무해
                 log.warning("첨부 OCR 처리 실패(무시): %s", e)
 
     # 5) runners 갱신 + run_logs 원장 기록(트랜잭션, 원장 재계산). 실패 시 ✅→⚠️ 로 알려 거짓 접수 방지.
     try:
-        recorded, new_streak = await db.record_run(
-            user_id, today, raw_text=raw_text, **fields
-        )
+        recorded, new_streak = await db.record_run(user_id, today, **fields)
     except Exception:  # noqa: BLE001 — 저장 실패를 사용자에게 알린다(✅만 남아 오인하는 일 방지)
         log.exception("record_run 실패")
-        try:
-            me = message.guild.me if message.guild else None
-            if me is not None:
-                await message.remove_reaction("✅", me)
-            await message.add_reaction("⚠️")
-        except Exception as e:  # noqa: BLE001
-            log.warning("실패 표시 리액션 변경 실패: %s", e)
+        await _swap_reaction(message, remove="✅", add="⚠️")
         return
     if not recorded:
-        # 같은 날 이미 기록됨(동시 업로드 경합 등) → 중복 집계 방지, 무음.
+        # 같은 날 이미 기록됨(동시 업로드 경합 등) → 중복 집계 방지. 거짓 접수로 남지 않게 ✅ 제거.
+        await _swap_reaction(message, remove="✅")
         return
 
     # 6) 응답 (명세 7.1 / 8). 스트릭만 알리고 업로더 멘션을 덧붙인다(OCR 거리는 채널 미노출).
-    #    소프트 힌트: OCR 4필드를 모두 못 읽었으면 취소 안내만 덧붙인다(집계는 막지 않음 — 명세 2).
+    #    소프트 힌트: OCR 을 '시도했으나' 4필드를 모두 못 읽었을 때만 취소 안내(집계는 막지 않음 — 명세 2).
+    #    이미지 >25MB·다운로드 실패로 시도조차 못 한 경우엔 붙이지 않는다.
     hint = ""
-    if config.ocr_enabled and not any(v is not None for v in fields.values()):
+    if ocr_attempted and not any(v is not None for v in fields.values()):
         hint = "\n-# 러닝 정보를 읽지 못했습니다. 잘못 올린 경우 `/달리기 취소` 로 되돌릴 수 있습니다."
     # 완료 메시지는 간결하게 유지한다. 04시 경계(새벽 러닝=전날) 설명은 매번 띄우지 않고
     # /스트릭·/캘린더 안내로 옮겼다(사용자 결정 2026-06-25).

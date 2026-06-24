@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 
@@ -78,14 +79,16 @@ HELP_TEXT = """## 🏃 러닝 스트릭 봇 사용설명서
 - `/달리기 등록` — 선수 등록(옵트인)
 - `/달리기 해제` — 등록 취소 (기록은 보존)
 - `/달리기 취소` — 내 **가장 최근 기록 1건** 되돌리기 (잘못 올렸을 때)
+- `/달리기 전체삭제` — 내 **모든 데이터 영구 삭제** (되돌릴 수 없음)
 - `/스트릭` (또는 `/기록`) — 내 러닝 기록: 연속·최장·이번 달 + 누적 거리·시간·페이스·칼로리 + 페이스 추세 그래프
-- `/캘린더` — 러닝 달력(월별) + 주간·월간 합계
+- `/캘린더 [월] [연도]` — 러닝 달력 + 주간·월간 합계 (`월`·`연도` 생략 시 이번 달; 과거 달·연도도 조회 가능)
 - `/리더보드` — 등록 선수들의 스트릭 랭킹
 - `/도움` — 이 설명서
 
 ### 참고
 - 등록한 사람이 **지정된 채널**에 올린 **이미지**만 집계됩니다(다른 채널·미등록자·텍스트는 무시).
-- 거리·시간·페이스·칼로리는 사진에서 자동 인식(OCR)한 값이라 **정확하지 않거나 일부 비어 있을 수 있습니다**(앱·화면마다 다름). 다만 **스트릭(연속 일수) 집계에는 전혀 영향이 없습니다.**"""
+- 거리·시간·페이스·칼로리는 사진에서 자동 인식(OCR)한 값이라 **정확하지 않거나 일부 비어 있을 수 있습니다**(앱·화면마다 다름). 다만 **스트릭(연속 일수) 집계에는 전혀 영향이 없습니다.**
+- 개인정보: 집계를 위해 **디스코드 ID와 사진에서 읽은 수치(거리·시간·페이스·칼로리)** 만 저장하며, 사진 원본·OCR 원문은 저장하지 않습니다. 내 데이터 전체 삭제는 `/달리기 전체삭제`."""
 
 
 def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
@@ -108,7 +111,9 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
         else:
             msg = (
                 "등록이 완료되었습니다. 지정 채널에 러닝 사진을 올리면 자동으로 스트릭이 쌓입니다. 🏃\n"
-                "현재 스트릭은 `/스트릭`, 랭킹은 `/리더보드` 로 확인할 수 있습니다."
+                "현재 스트릭은 `/스트릭`, 랭킹은 `/리더보드` 로 확인할 수 있습니다.\n"
+                "-# 집계를 위해 디스코드 ID와 사진에서 읽은 거리·시간·페이스·칼로리를 저장합니다. "
+                "전체 삭제는 `/달리기 전체삭제` 로 언제든 가능합니다."
             )
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -134,6 +139,30 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
             f"최근 기록(`{deleted_date.isoformat()}`)을 취소하였습니다. "
             f"현재 연속 **{cur}일** · 총 **{total}회**.\n"
             "잘못 올린 기록이라면 올바른 날짜의 사진을 다시 올리십시오.",
+            ephemeral=True,
+        )
+
+    @dalligi.command(
+        name="전체삭제",
+        description="내 러닝 데이터(스트릭·모든 기록)를 영구 삭제합니다. 되돌릴 수 없습니다.",
+    )
+    @app_commands.describe(확인="정말 지우려면 '삭제' 를 입력하십시오.")
+    async def purge(interaction: discord.Interaction, 확인: str = ""):
+        # 파괴적·비가역 → 명시적 확인 토큰을 요구(버튼 대신 입력값으로 단순·검증가능하게).
+        if 확인.strip() != "삭제":
+            await interaction.response.send_message(
+                "⚠️ 되돌릴 수 없는 작업입니다. 정말 삭제하려면 `확인` 옵션에 `삭제` 를 입력해 다시 실행하십시오.\n"
+                "(내 디스코드 ID·연속 일수·모든 러닝 기록이 영구 삭제됩니다.)",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)  # DELETE 가 3초 넘을 수 있어 먼저 ack
+        runs, had_row = await db.purge_user(interaction.user.id)
+        if runs == 0 and not had_row:
+            await interaction.followup.send("삭제할 데이터가 없습니다.", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"내 러닝 데이터를 전부 삭제하였습니다(기록 {runs}건). 다시 시작하려면 `/달리기 등록` 하십시오.",
             ephemeral=True,
         )
 
@@ -248,12 +277,16 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
             await interaction.followup.send("아직 등록된 선수가 없습니다. `/달리기 등록` 으로 시작하십시오.")
             return
 
+        # 표시 이름은 캐시 미스 시 REST fetch_user 가 필요 → 순차 대신 동시 조회로 지연 누적 방지.
+        names = await asyncio.gather(
+            *(_display_name(interaction, r.user_id) for r in ranked)
+        )
         medals = ["🥇", "🥈", "🥉"]
         lines = ["## 🏃 러닝 스트릭 리더보드"]
         for i, r in enumerate(ranked):
             eff = effective_streak(r.last_run_date, r.current_streak, today)
             rank = medals[i] if i < 3 else f"{i + 1}."
-            name = await _display_name(interaction, r.user_id)
+            name = names[i]
             dist = dist_totals.get(r.user_id)
             dist_str = f" · 누적 {float(dist):.1f}km" if dist else ""
             lines.append(
@@ -309,13 +342,14 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
             "-# 🕓 하루 경계는 새벽 4시 — 0시~새벽 4시 러닝은 전날 날짜로 집계됩니다.",
             f"📊 {m}월 합계: {mcnt}회 · {mdist:.1f}km · {_fmt_duration(mdur)} · {mcal}kcal",
         ]
-        if year == today.year and m == today.month:  # 현재 달일 때만 '이번 주(월~일)' 합계
-            monday = today - timedelta(days=today.weekday())
-            sunday = monday + timedelta(days=6)
-            w = await db.period_summary(interaction.user.id, monday, sunday)
+        if year == today.year and m == today.month:  # 현재 달일 때만 '이번 주' 합계
+            # 달력 그리드가 일요일 시작이므로 주간 합계도 일~토로 맞춘다(주 경계 일치).
+            sun = today - timedelta(days=(today.weekday() + 1) % 7)
+            sat = sun + timedelta(days=6)
+            w = await db.period_summary(interaction.user.id, sun, sat)
             wdist = float(w.get("dist") or 0)
             lines.append(
-                f"🗓️ 이번 주: {int(w.get('cnt') or 0)}회 · {wdist:.1f}km · "
+                f"🗓️ 이번 주(일~토): {int(w.get('cnt') or 0)}회 · {wdist:.1f}km · "
                 f"{_fmt_duration(w.get('dur') or 0)} · {int(w.get('cal') or 0)}kcal"
             )
         await interaction.followup.send("\n".join(lines), ephemeral=True)

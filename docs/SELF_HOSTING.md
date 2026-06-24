@@ -48,7 +48,7 @@
 
 4. **OAuth2 → URL Generator**:
    - scopes: `bot`, `applications.commands`
-   - bot permissions: **View Channels**, **Send Messages**, **Read Message History**, **Add Reactions** (선택: **Manage Messages** — 저장 실패 시 ✅를 ⚠️로 바꾸는 데 사용)
+   - bot permissions: **View Channels**, **Send Messages**, **Read Message History**, **Add Reactions** (이 4개면 충분 — 봇은 '자기 리액션'만 바꾸므로 Manage Messages 는 필요 없습니다)
    - 생성된 URL 로 **본인 서버에 초대**합니다.
 
    > members 인텐트는 필요하지 않습니다(리더보드 이름은 `fetch_user` 로 조회).
@@ -84,6 +84,7 @@ cp .env.example .env
 - `POSTGRES_PASSWORD` — 강한 무작위 값. 예: `openssl rand -base64 24`.
 - `POSTGRES_USER`/`POSTGRES_DB` — 그대로 둬도 됩니다(기본 `streak`).
 - `TZ`, `OCR_ENABLED` — 보통 기본값 유지.
+- `BOT_PAUSED` — 킬스위치. `true` 면 사진 집계를 즉시 중단(조회 커맨드는 동작). 평소 `false`.
 
 > `.env` 는 `.gitignore` 로 보호되어 **절대 커밋되지 않습니다**. 추적 대상은 `.env.example`(플레이스홀더)뿐입니다.
 
@@ -134,7 +135,9 @@ docker compose logs -f bot   # "로그인:" 과 "슬래시 커맨드 N개 동기
 docker compose run --rm bot python -m pytest -q
 
 # DB 테이블 생성 확인
-docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c '\dt'
+#  (변수는 컨테이너 안에서 풀려야 하므로 sh -c 로 감쌉니다 — 호스트 셸엔 POSTGRES_* 가 없어
+#   `psql -U "$POSTGRES_USER"` 를 그냥 쓰면 빈 값으로 확장돼 실패합니다)
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt"'
 
 # DB 포트 미발행 확인 (db 의 PORTS 칸이 비어 있어야 정상)
 docker compose ps
@@ -156,14 +159,29 @@ docker compose ps
 # 봇만 재시작
 docker compose restart bot
 
-# 백업 (기본 미설정 — 직접 구성 권장; cron 추천)
-docker compose exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backup-$(date +%F).sql
-
 # 업데이트 (소스 COPY라 재빌드 필요)
 git pull && docker compose up -d --build
 
 # 중지 (데이터는 pgdata 볼륨에 보존)
 docker compose down
+```
+
+**킬스위치 / 유지보수 모드**: 잘못된 집계를 급히 멈추려면 `.env` 의 `BOT_PAUSED=true` 로 바꾸고 `docker compose up -d bot`. 조회 커맨드는 계속 동작합니다. 끝나면 `false` 로 되돌립니다.
+
+**봇 무응답 런북**(사진에 반응 없음/슬래시 무응답):
+1. `docker compose ps` — 컨테이너 상태 확인.
+2. `docker compose logs --tail=100 bot` — 재연결 루프·예외 확인.
+3. `docker compose restart bot` — 대개 복구됨.
+> (오프라인 동안 올라온 사진은 재처리되지 않으므로, 사용자에게 재업로드를 안내하십시오.)
+
+**백업/복원**(기본 미설정 — 꼭 구성하십시오). 봇은 스케줄러를 두지 않으므로 **호스트 cron** 으로 돌립니다.
+```bash
+# 백업 (변수는 컨테이너 안에서 풀리도록 sh -c)
+docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backup-$(date +%F).sql
+# 복원
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < backup-YYYY-MM-DD.sql
+# 예) 호스트 crontab — 매일 03:30 덤프 + 14일 경과분 삭제
+# 30 3 * * * cd /path/to/running-streak && docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backups/$(date +\%F).sql && find backups -name '*.sql' -mtime +14 -delete
 ```
 
 > ⚠️ `docker compose down -v` 는 `pgdata` 볼륨까지 삭제합니다(스트릭 전부 소실, 되돌릴 수 없음).
@@ -178,6 +196,12 @@ docker compose down
 - 커밋 가드 훅 활성화: `git config core.hooksPath .githooks` (민감 패턴이 섞인 커밋을 차단).
 - 토큰이 유출되면 Developer Portal 에서 **Reset Token** 후 `.env` 갱신 → `docker compose up -d`.
 - DB 에 호스트 포트 매핑을 추가하지 마십시오(내부 네트워크 전용 유지).
+
+### 개인정보(타인 데이터) 취급
+- 봇은 등록(옵트인) 사용자의 **디스코드 ID + 사진에서 읽은 수치(거리·시간·페이스·칼로리)** 만 저장합니다. **사진 원본·OCR 원문은 저장하지 않습니다**(데이터 최소화).
+- 사용자는 `/달리기 전체삭제`(`확인=삭제`)로 **본인 데이터 전부를 직접 삭제**할 수 있습니다(삭제권). 운영자 수동 삭제가 필요하면:
+  `docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "DELETE FROM run_logs WHERE user_id=<ID>; DELETE FROM runners WHERE user_id=<ID>;"'`
+- 공개 레포에 **타인의 식별정보(닉네임·실데이터)를 커밋하지 마십시오**. 본 레포는 커밋 가드 훅으로 비밀 패턴을 차단하지만, 닉네임 같은 자유 텍스트는 작성자가 직접 주의해야 합니다.
 
 ---
 

@@ -60,6 +60,8 @@ class Config:
     pg_db: str = "streak"
 
     ocr_enabled: bool = True
+    # 킬스위치/유지보수 모드: True 면 사진 업로드 집계를 즉시 중단(조회 커맨드는 동작).
+    paused: bool = False
 
     @property
     def dsn(self) -> str:
@@ -80,4 +82,5 @@ def load_config() -> Config:
         pg_password=_require("POSTGRES_PASSWORD"),
         pg_db=_require("POSTGRES_DB"),
         ocr_enabled=_bool("OCR_ENABLED", True),
+        paused=_bool("BOT_PAUSED", False),
     )

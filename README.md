@@ -23,7 +23,10 @@
 |--------|------|
 | `/달리기 등록` | 선수 등록(옵트인). 이후 지정 채널 사진 자동 집계 시작 |
 | `/달리기 해제` | 등록 취소(기록은 보존) |
-| `/스트릭` | 내 현재 연속 일수 + 누적 통계 (읽기 전용, 본인만 보임) |
+| `/달리기 취소` | 내 가장 최근 기록 1건 되돌리기 |
+| `/달리기 전체삭제` | 내 모든 데이터 영구 삭제(`확인=삭제` 필요) |
+| `/스트릭` (또는 `/기록`) | 내 현재 연속 일수 + 누적 통계 (읽기 전용, 본인만 보임) |
+| `/캘린더 [월] [연도]` | 러닝 달력 + 주간·월간 합계 |
 | `/리더보드` | 등록 선수들의 스트릭 랭킹 |
 
 자동: 등록 선수가 지정 채널에 사진 업로드 → 스트릭 갱신 + `### 러닝 기록 완료. N일째 연속입니다.` (04시 경계 안내는 `/스트릭`·`/캘린더`에 표시)
@@ -60,12 +63,15 @@
 ## 2) 설정 파일 작성
 
 ```bash
+# 커밋 가드 훅 활성화(클론 후 1회, 커밋 전에) — 민감 패턴 오커밋 차단
+git config core.hooksPath .githooks
+
 cp .env.example .env
 # .env 를 열어 DISCORD_TOKEN / DISCORD_GUILD_ID / TARGET_CHANNEL_ID 와
 # POSTGRES_PASSWORD(임의 강한 값) 를 채운다.
 ```
 
-## 3) 빌드 & 실행 (srv1)
+## 3) 빌드 & 실행
 
 ```bash
 docker compose up -d --build
@@ -78,11 +84,9 @@ docker compose logs -f bot      # "로그인:" 과 "슬래시 커맨드 N개 동
 # 단위 테스트 (스트릭 경계값)
 docker compose run --rm bot python -m pytest -q
 
-# DB 테이블 생성 확인
-docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c '\dt'
-
-# 커밋 가드 훅 활성화(클론 후 1회) — 민감 패턴 오커밋 방지
-git config core.hooksPath .githooks
+# DB 테이블 생성 확인 (변수는 컨테이너 내부에서 풀리도록 sh -c 로 감싼다 —
+#  호스트 셸엔 POSTGRES_* 가 없어 그냥 쓰면 빈 값으로 확장됨)
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt"'
 ```
 
 디스코드에서:
@@ -102,4 +106,14 @@ docker compose up -d --build   # 코드 수정 후 재배포
 
 서버 재부팅 후에도 `restart: unless-stopped` 로 자동 복구된다.
 
-> 보안: `.env` 는 `.gitignore` 에 있어 커밋되지 않는다. 토큰이 노출되면 Developer Portal 에서 **Reset Token**.
+**킬스위치**: 잘못된 집계를 급히 멈추려면 `.env` 의 `BOT_PAUSED=true` 로 바꾸고 `docker compose up -d bot`. (조회 커맨드는 계속 동작.)
+
+**봇 무응답(사진에 반응 없음/슬래시 무응답) 런북**: `docker compose ps` → `docker compose logs --tail=100 bot` 으로 재연결/예외 확인 → `docker compose restart bot`.
+
+**백업(권장, 기본 미설정)**: 호스트 cron 으로 매일 덤프 + N일 보존, 복원은 덤프를 psql 로 주입.
+```bash
+docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backup-$(date +%F).sql   # 백업
+docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < backup-YYYY-MM-DD.sql      # 복원
+```
+
+> 보안: `.env` 는 `.gitignore` 에 있어 커밋되지 않는다. 토큰이 노출되면 Developer Portal 에서 **Reset Token**. 상세 셀프호스팅·삭제·보존은 [`docs/SELF_HOSTING.md`](docs/SELF_HOSTING.md).

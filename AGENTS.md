@@ -35,7 +35,8 @@ The behavioral source of truth is `DESIGN.md` (see §3 "확정 결정사항 / im
 ## Configuration surface (env-driven)
 
 Required (the bot will not start without these): `DISCORD_TOKEN`, `DISCORD_GUILD_ID`, `TARGET_CHANNEL_ID`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`.
-Optional with defaults: `POSTGRES_HOST=db`, `POSTGRES_PORT=5432`, `OCR_ENABLED=true`, `TZ=Asia/Seoul`.
+Optional with defaults: `POSTGRES_HOST=db`, `POSTGRES_PORT=5432`, `OCR_ENABLED=true`, `TZ=Asia/Seoul`, `BOT_PAUSED=false` (kill switch — set `true` to halt aggregation immediately; query commands still work).
+Note: psql inside the db container needs its env, so wrap it: `docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "..."'` (a bare host-shell `$POSTGRES_USER` expands empty). Users can self-delete all their data with `/달리기 전체삭제`; only the four OCR-derived numbers are stored (no image, no raw OCR text).
 `docker-compose.yml` runs two services: `db` (postgres:16-alpine, **no published host port**, named volume `pgdata`) and `bot` (built from `./bot`). Slash commands are synced guild-scoped to `DISCORD_GUILD_ID`.
 
 ---
@@ -46,7 +47,7 @@ Optional with defaults: `POSTGRES_HOST=db`, `POSTGRES_PORT=5432`, `OCR_ENABLED=t
 2. **Clone** the repo into the user's chosen directory.
 3. **Activate the secret guard:** `git config core.hooksPath .githooks`.
 4. **Scaffold `.env`:** `cp .env.example .env`. Fill ONLY the non-secret values (`DISCORD_GUILD_ID`, `TARGET_CHANNEL_ID`, optionally `POSTGRES_USER`/`POSTGRES_DB`, `TZ`). Leave `DISCORD_TOKEN` and `POSTGRES_PASSWORD` as placeholders, then **stop and ask the human to fill them in their own terminal.**
-5. **Human checkpoint — Discord.** Tell the human to: create the application; enable **MESSAGE CONTENT INTENT** (without it, uploads are silently ignored — the #1 failure); invite the bot with scopes `bot` + `applications.commands` and permissions View Channels / Send Messages / Read Message History / Add Reactions (optional Manage Messages); then paste the token into `.env`. Wait for confirmation. (Details in `docs/SELF_HOSTING.md` §2.)
+5. **Human checkpoint — Discord.** Tell the human to: create the application; enable **MESSAGE CONTENT INTENT** (without it, uploads are silently ignored — the #1 failure); invite the bot with scopes `bot` + `applications.commands` and permissions View Channels / Send Messages / Read Message History / Add Reactions (these four suffice — the bot only edits its OWN reactions, so Manage Messages is NOT needed); then paste the token into `.env`. Wait for confirmation. (Details in `docs/SELF_HOSTING.md` §2.)
 6. **Locale / timezone check.** Ask the user's timezone and whether they want a non-Korean UI.
    - Non-Korea timezone: edit `bot/app/events.py` (the `KST = ZoneInfo("Asia/Seoul")` line and the `DAY_RESET_HOUR = 4` line), `.env` `TZ`, and `bot/Dockerfile` `ENV TZ`.
    - Non-Korean UI: translate the Korean strings in `bot/app/commands.py` (`HELP_TEXT`, all command `name=`/`description=`, responses) and `bot/app/events.py` (completion message). This is a sizeable effort — confirm scope with the user.
