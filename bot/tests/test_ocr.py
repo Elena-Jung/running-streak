@@ -12,6 +12,7 @@ from app.ocr import (
     extract_duration_sec,
     extract_fields,
     extract_pace_sec_per_km,
+    extract_speed_kmh,
 )
 
 
@@ -127,3 +128,98 @@ def test_fields_speed_only_screen_has_no_distance():
     assert f["duration_sec"] == 25 * 60
     assert f["pace_sec_per_km"] == 6 * 60
     assert f["calories"] == 200
+
+
+# --- 속도(km/h) 파싱: 트레드밀/헬스장 화면 -------------------------------
+
+def test_speed_kmh_decimal_with_space():
+    assert extract_speed_kmh("평균 속도 8.4 km/h") == Decimal("8.4")
+
+
+def test_speed_kmh_decimal_no_space():
+    assert extract_speed_kmh("8.4km/h") == Decimal("8.4")
+
+
+def test_speed_kmh_integer_allowed():
+    # km/h 앵커가 있어 정수도 허용(거리와 달리).
+    assert extract_speed_kmh("평균 속도 8 km/h") == Decimal("8")
+
+
+def test_speed_kmh_kph_form():
+    assert extract_speed_kmh("8.4 kph") == Decimal("8.4")
+
+
+def test_speed_kmh_out_of_range_rejected():
+    assert extract_speed_kmh("80 km/h") is None   # 비현실적 고속(노이즈)
+    assert extract_speed_kmh("0 km/h") is None     # 0 노이즈
+
+
+def test_speed_kmh_none_when_absent():
+    assert extract_speed_kmh("거리 5.00 km") is None  # km(/h 아님)는 속도 아님
+
+
+def test_speed_kmh_not_grabbed_as_distance():
+    # 방어: 속도 표기는 거리로 잡히지 않는다.
+    assert extract_distance_km("평균 속도 8.4 km/h") is None
+
+
+# --- 역산(거리/속력/시간) -------------------------------------------------
+
+def test_pace_derived_from_speed_only():
+    # 시간+속도만(거리·페이스 없음) → 페이스=3600/속도, 거리=시간/페이스.
+    f = extract_fields("운동 시간 21:55\n평균 속도 8.4 km/h")
+    assert f["duration_sec"] == 21 * 60 + 55      # 1315
+    assert f["pace_sec_per_km"] == 429            # round(3600/8.4)
+    assert f["distance_km"] == Decimal("3.07")    # 1315/429
+
+
+def test_duration_derived_from_distance_and_speed():
+    # 거리+속도만(시간·페이스 없음) → 페이스=3600/속도, 시간=거리×페이스.
+    f = extract_fields("거리 3.10 km\n평균 속도 8.4 km/h")
+    assert f["pace_sec_per_km"] == 429            # round(3600/8.4)
+    assert f["duration_sec"] == 1330              # round(3.10*429)
+    assert f["distance_km"] == Decimal("3.10")    # OCR 값 유지
+
+
+def test_pace_derived_from_core_not_speed():
+    # 거리·시간이 둘 다 있으면 페이스는 시간/거리(코어)로 — 속도(반올림값)보다 정확.
+    f = extract_fields("거리 3.10 km\n운동 시간 21:55\n평균 속도 8.4 km/h")
+    assert f["pace_sec_per_km"] == 424            # round(1315/3.10), NOT 429(=3600/8.4)
+
+
+def test_speed_ignored_when_pace_ocrd():
+    # OCR 페이스가 있으면 속도는 무시(덮어쓰지 않음).
+    f = extract_fields("평균 페이스 6'00\"/km\n평균 속도 8.4 km/h")
+    assert f["pace_sec_per_km"] == 6 * 60         # 360, 속도 환산(429) 아님
+
+
+def test_derived_pace_out_of_bounds_dropped():
+    # 속도 40km/h → pace=90s/km 는 범위(120~1800) 밖 → 채우지 않음.
+    f = extract_fields("운동 시간 20:00\n평균 속도 40 km/h")
+    assert f["pace_sec_per_km"] is None
+    assert f["distance_km"] is None               # 페이스 없으니 거리도 유도 안 함
+    assert f["duration_sec"] == 20 * 60
+
+
+def test_speed_only_yields_pace_no_distance_or_duration():
+    # 속도만 있으면 페이스는 환산되지만 거리·시간은 둘 다 없어 유도 불가.
+    f = extract_fields("평균 속도 8.4 km/h")
+    assert f["pace_sec_per_km"] == 429
+    assert f["distance_km"] is None
+    assert f["duration_sec"] is None
+
+
+def test_fields_treadmill_screen_full():
+    # 삼성헬스 트레드밀(헬스장) 화면 합성: 페이스 대신 속도 표시.
+    text = (
+        "3.10 km\n달리기\n"
+        "운동 시간 21:55\n평균 속도 8.4 km/h\n"
+        "평균 심박수 174 bpm\n운동 칼로리 185 kcal\n"
+        "평균 케이던스 142 spm\n걸음 3,128\n"
+        "2026년 6월 24일 (수) 오후 11:32"
+    )
+    f = extract_fields(text)
+    assert f["distance_km"] == Decimal("3.10")
+    assert f["duration_sec"] == 1315              # 21:55, 날짜줄 11:32 는 제외
+    assert f["pace_sec_per_km"] == 424            # 코어(시간/거리) 유도, 속도 아님
+    assert f["calories"] == 185

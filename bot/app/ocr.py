@@ -58,6 +58,14 @@ _CAL_RES = (
     re.compile(r"칼로리\s*(\d{1,5})"),
 )
 
+# ── 속도 (km/h) ───────────────────────────────────────────────────────────
+# 삼성헬스 트레드밀(헬스장) 화면은 페이스 대신 "평균 속도 8.4 km/h" 를 보여준다.
+# "km/h"(또는 kph/km/시) 앵커가 거리(소수만 인정)와 구분해 주므로 정수도 허용한다.
+_SPEED_RE = re.compile(
+    r"(\d{1,2}(?:\s*[.,]\s*\d{1,2})?)\s*(?:k\s*m\s*/\s*h|kph|km\s*/\s*시)",
+    re.IGNORECASE,
+)
+
 
 def _reasonable_km(val: Decimal) -> bool:
     return Decimal("0") < val <= Decimal("100")  # 풀코스(~42km)를 넉넉히 포함
@@ -154,22 +162,74 @@ def extract_calories(text: str) -> int | None:
     return None
 
 
-def extract_fields(text: str) -> dict:
-    """4개 부가정보를 한 번에. 못 찾은 항목은 None.
+def extract_speed_kmh(text: str) -> Decimal | None:
+    """평균 속도(km/h). 'km/h' 앵커가 있어 거리와 달리 정수도 허용. 1~40 범위만.
 
-    거리 OCR 이 실패했고 시간·페이스가 모두 있으면 거리를 유도한다
-    (distance = time / pace). 거리 항목이 없는 화면(예: 삼성헬스 상세)에서도
-    거리를 채울 수 있고, 시간·페이스가 정확하면 수학적으로 정확하다.
+    저장하지 않고 extract_fields 의 역산 입력으로만 쓰인다(페이스로 환산).
+    """
+    for m in _SPEED_RE.finditer(text):
+        raw = m.group(1).replace(" ", "").replace(",", ".")
+        try:
+            val = Decimal(raw)
+        except InvalidOperation:
+            continue
+        if Decimal("1") <= val <= Decimal("40"):  # 걷기~엘리트 러닝 상식 범위
+            return val
+    return None
+
+
+# 역산 결과 위생 검사용 범위(OCR/유도 노이즈가 DB 를 오염시키지 않게).
+def _ok_pace(p: int | None) -> bool:
+    return p is not None and 120 <= p <= 1800
+
+
+def _ok_duration(d: int | None) -> bool:
+    return d is not None and 30 <= d <= 86400
+
+
+def _ok_distance(km: Decimal | None) -> bool:
+    return km is not None and Decimal("0") < km <= Decimal("100")
+
+
+def extract_fields(text: str) -> dict:
+    """4개 부가정보를 한 번에. 못 찾은 항목은 거리/속력/시간 관계로 역산한다.
+
+    역산 원칙(명세 2: OCR 은 부가정보):
+    - **OCR 로 읽은 값은 절대 덮어쓰지 않는다.** 비어 있는(None) 필드만 채운다.
+    - 페이스가 없으면 ① 거리·시간(코어)으로 `pace=시간/거리`(가장 정확), 없으면
+      ② 속도로 `pace=3600/(km/h)`(폴백). 트레드밀 화면처럼 속도만 있는 경우 대응.
+    - 거리 없으면 `시간/페이스`, 시간 없으면 `거리×페이스` 로 채운다.
+    - 모든 유도값은 범위검사를 통과해야 저장(노이즈 차단). 속도는 DB 에 저장하지 않고
+      페이스로 환산만 한다(스키마·표시 무변경).
     """
     distance = extract_distance_km(text)
     duration = extract_duration_sec(text)
     pace = extract_pace_sec_per_km(text)
     calories = extract_calories(text)
+    speed = extract_speed_kmh(text)  # 역산 입력 전용(반환 dict 에는 넣지 않음)
 
+    # 1) 페이스 유도(피벗). 코어(거리·시간) 우선, 없으면 속도 폴백.
+    if pace is None:
+        if duration and _ok_distance(distance):
+            cand = round(duration / float(distance))
+            if _ok_pace(cand):
+                pace = cand
+        if pace is None and speed is not None:
+            cand = round(3600 / float(speed))
+            if _ok_pace(cand):
+                pace = cand
+
+    # 2) 거리 유도: 시간/페이스.
     if distance is None and duration and pace:
-        derived = (Decimal(duration) / Decimal(pace)).quantize(Decimal("0.01"))
-        if Decimal("0") < derived <= Decimal("100"):
-            distance = derived
+        cand = (Decimal(duration) / Decimal(pace)).quantize(Decimal("0.01"))
+        if _ok_distance(cand):
+            distance = cand
+
+    # 3) 시간 유도: 거리×페이스.
+    if duration is None and _ok_distance(distance) and pace:
+        cand = round(float(distance) * pace)
+        if _ok_duration(cand):
+            duration = cand
 
     return {
         "distance_km": distance,
