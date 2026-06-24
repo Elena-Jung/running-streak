@@ -4,7 +4,7 @@
 > 앞으로 코드/스키마/동작/명령어를 바꾸는 **모든 작업은 이 문서를 함께 갱신**해야 한다.
 > (관련: 1단계 명세 `RUNNING_STREAK_BOT_SPEC.md` = 맥북 `~/Documents/running-streak`. 본 문서는 2단계 구현의 진실원.)
 
-최종 갱신: 2026-06-24 (전처리를 적응형 이진화로 — 화면크기/앱 견고성)
+최종 갱신: 2026-06-24 (전체 QA 반영: 동시성·비차단 OCR·defer·운영 견고성)
 
 ---
 
@@ -60,12 +60,12 @@
 ### 5.1 사진 업로드 집계 — `events.handle_message` ([bot/app/events.py](bot/app/events.py))
 1. 봇/다른봇/DM 무시 → 채널이 `TARGET_CHANNEL_ID` 아니면 무시 → 이미지 첨부 없으면 무시 → 미등록자 무시.
 2. `today = KST(message.created_at)`. `record = load(user)`.
-3. `new_streak, counted = compute_on_run(last_run, cur, today)` (순수 함수).
-4. `counted=False`(gap 0 또는 음수)면 **무음 종료**(반응도 없음).
-5. **즉시 ✅ 반응**(느린 OCR 전에 접수 표시, '반응 추가하기' 권한 없으면 무시).
-6. OCR best-effort(`ocr.try_extract`, 예외 전부 흡수) → `record_run`(트랜잭션: run_logs INSERT + runners UPDATE).
-   - `record_run`이 `False`(같은 날 유니크 충돌=동시 업로드 경합) 반환 시 **무음 종료**(중복 집계 방지).
-7. 채널에 `### 오늘의 러닝 완료! N일째 연속!` + 업로더 멘션 전송.
+3. `compute_on_run`으로 **counted 게이트만** 판정(gap≤0이면 무음 종료, 반응도 없음). 실제 스트릭 값은 record_run 이 원장에서 재계산해 돌려준다.
+4. **즉시 ✅ 반응**(접수 표시, 권한 없으면 무시).
+5. OCR best-effort — **`asyncio.to_thread`로 워커 스레드 오프로드 + Semaphore(2)로 동시 수 제한** → 이벤트 루프·하트비트·다른 커맨드를 막지 않는다.
+6. `record_run(...)` → `(recorded, current_streak)`. 트랜잭션 안에서 `SELECT … FOR UPDATE`로 같은 사용자를 직렬화하고 run_logs INSERT 후 **원장 전체 재계산**으로 runners 갱신.
+   - `recorded=False`(같은 날 유니크 충돌) → **무음 종료**. record_run 이 예외면 ✅를 ⚠️로 바꿔 **거짓 접수 방지**.
+7. 채널에 `### 오늘 러닝 기록 완료. N일째 연속입니다.` + 업로더 멘션 전송.
    - **소프트 힌트**: OCR 4필드를 모두 못 읽었으면(엉뚱한 이미지 가능성) 메시지 끝에 `/달리기 취소` 안내를 subtext로 덧붙인다. **집계는 막지 않는다**(명세 2: OCR이 스트릭을 좌우하지 않음). 사진형 정상 러닝(신발·워치·트레드밀·해외앱)도 OCR이 비기 쉬워 게이트/확인은 두지 않기로 결정.
 
 ### 5.2 스트릭 규칙 — `streak.compute_on_run` ([bot/app/streak.py](bot/app/streak.py))
@@ -76,8 +76,9 @@
 ### 5.3 조회(읽기 전용) — `streak.effective_streak`
 - `gap > 3` → `0`(유령 스트릭 차단), 아니면 저장된 current. **저장값 변경 없음.**
 
-### 5.4 취소/재계산 — `db.undo_last_run` + `streak.recompute_from_dates`
-- `/달리기 취소`: 본인 최근 `run_logs` 1건 삭제 후 남은 run_date 집합으로 스트릭 전부 재계산(트랜잭션). 등록은 유지.
+### 5.4 기록/취소 재계산 — `db.record_run` · `db.undo_last_run` + `streak.recompute_from_dates`
+- **record_run·undo 모두 `SELECT … FOR UPDATE`로 사용자 단위 직렬화** → load→계산→저장 경합(TOCTOU)·동시 기록/취소 경합 제거.
+- 둘 다 INSERT/DELETE 후 남은 run_date 집합으로 **runners 전체 재계산**(증분 아님) → 재등록 후 유령 부활·UPDATE-0행 문제도 함께 사라짐. runners 는 항상 원장의 함수.
 - `recompute_from_dates(dates)`: 정렬·중복제거 후 동일 유예 규칙으로 (current, max, last, total) 산출.
 
 ### 5.5 OCR 부가정보 — [bot/app/ocr.py](bot/app/ocr.py)
@@ -113,7 +114,7 @@
 | (자동) | 등록자가 지정 채널에 이미지 업로드 시 집계+응답 | 공개 |
 
 ## 7. 무결성 안전장치 & 점검 결과
-- **동시 업로드 경합**: 같은 날 두 장 동시 업로드 → `run_logs` UNIQUE(user,date)로 두 번째 INSERT 충돌 → `record_run`이 False 반환 → 중복 집계/응답 차단. (라이브 동시성 테스트 통과: 정확히 하나만 성공.)
+- **동시성**: record_run·undo 가 runners 행 `FOR UPDATE`로 사용자 단위 직렬화 → 같은 날 경합은 UNIQUE 로 하나만 성공, 서로 다른 날 동시 업로드(TOCTOU)는 직렬 재계산으로 최종 일관(라이브 동시성 테스트 통과). **OCR 은 워커 스레드 오프로드라 집계·커맨드·하트비트를 막지 않음**.
 - **일관성**: `record_run`/`undo_last_run` 모두 트랜잭션 → runners·run_logs 동시 갱신/롤백.
 - **유령 스트릭**: 조회 시 `effective_streak`로 보정, 저장값 불변.
 - **OCR 격리**: 모든 OCR 경로 예외 흡수, 실패해도 스트릭 무영향. 거리 오인식(정수 노이즈)은 가드로 차단.
@@ -126,11 +127,11 @@
 - ~~운동시간 날짜오염~~ → **해결**: 날짜/업로드시각 줄을 운동시간 후보에서 제외(2026-06-24).
 - 표시 이름은 `fetch_user` 기반(서버 닉네임 캐시 없으면 글로벌 이름). members intent 미사용.
 - 채널 전송 권한이 없으면 집계는 되지만 안내 메시지는 생략(로그만).
-- OCR 성능: 이미지당 Tesseract 최대 8회(전처리 4종 × PSM 2종) + 칼로리 미검출 시 image_to_data 1회. **정확도 우선으로 조기종료는 의도적으로 두지 않음**(지연은 ✅ 즉시 반응으로 완충).
-- DB 백업 없음(운영 시 `pg_dump` 권장). 컨테이너 로그 로테이션 미설정(권장).
+- OCR 성능: 이미지당 Tesseract 최대 8회 + 칼로리 미검출 시 image_to_data 1회(이미지당 ~4–10초). 정확도 우선으로 조기종료 미채택, **워커 스레드 오프로드(Semaphore 2)로 이벤트 루프는 비차단** + ✅ 즉시 반응으로 체감 완충.
+- DB 백업 없음(운영 시 `pg_dump` 권장). [반영됨] asyncpg `command_timeout=15`, compose 로그 로테이션(10m×3)·`mem_limit`(bot 1g/db 512m)·POSTGRES_* 필수 마커.
 
 ## 9. 검증 방법
-- 단위 테스트: `docker compose run --rm bot python -m pytest -q` (현재 44건: 스트릭·재계산·OCR·차트).
+- 단위 테스트: `docker compose run --rm bot python -m pytest -q` (현재 58건: 스트릭·재계산·OCR·차트·config·이벤트핸들러).
 - 동시성/되돌리기: 가짜 user_id로 `record_run`/`undo_last_run`/race 스크립트 검증(일회성).
 - DB: `docker compose exec db psql … -c '\d run_logs'`(컬럼·인덱스), 집계 SQL 확인.
 - E2E: 디스코드에서 `/달리기 등록` → 이미지 업로드 → 응답 → `/스트릭`·`/기록`·`/리더보드`·`/도움`.
@@ -155,3 +156,4 @@
 - 거리 OCR 실패 시 시간·페이스로 거리 유도(distance=time/pace). 거리 항목 없는 삼성헬스 상세화면 등 대응, 기존 None 레코드도 백필. 테스트 42건.
 - 삼성헬스 거리 히어로(흰 글씨) 상단 크롭 읽기(변형 D), 운동시간 날짜줄 오염 수정, 런데이 2단 칼로리 좌표기반 추출 추가. 특정 사용자 오기록(2.31→5.94) 정정. 테스트 44건.
 - 전처리를 적응형(국소) 이진화로 교체(고정 크롭·임계값 제거) → 화면크기·앱·비율에 견고. 라벨 기반 텍스트 추출 + 거리 유도가 핵심, 2단 칼로리만 라벨-크기-상대 좌표 폴백.
+- 전체 QA(126 에이전트) 반영: record_run/undo 를 FOR UPDATE+원장 재계산으로 일원화(TOCTOU·재등록부활·UPDATE0행 해소), OCR 워커스레드 오프로드(DoS 방지)+Semaphore, 조회/취소 커맨드 defer + tree.error 전역핸들러, record_run 실패 시 ✅→⚠️, UNIQUE 마이그레이션 중복정리, 월 조회 범위쿼리(인덱스), 칼로리 다중매치, PIL 픽셀 상한, config 비밀 repr 제외·포트 검증, compose 로그로테이션·mem_limit·필수마커, requirements 고정. 테스트 44→58(config·events 추가). 문서 메시지 문구 통일.

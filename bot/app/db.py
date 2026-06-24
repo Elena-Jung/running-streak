@@ -40,6 +40,12 @@ ALTER TABLE run_logs ADD COLUMN IF NOT EXISTS duration_sec    INTEGER;
 ALTER TABLE run_logs ADD COLUMN IF NOT EXISTS pace_sec_per_km INTEGER;
 ALTER TABLE run_logs ADD COLUMN IF NOT EXISTS calories        INTEGER;
 
+-- 하루 1회 불변식 도입 전, 기존 같은 (user_id, run_date) 중복이 있으면 최신 id만 남기고 제거
+-- (그렇지 않으면 아래 UNIQUE INDEX 생성이 실패해 connect() 가 죽는다 — 진짜 멱등 보장).
+DELETE FROM run_logs a
+USING run_logs b
+WHERE a.user_id = b.user_id AND a.run_date = b.run_date AND a.id < b.id;
+
 -- 하루 1회 불변식: 같은 사용자·같은 날 중복 기록 금지(동시 업로드 경합 방어).
 CREATE UNIQUE INDEX IF NOT EXISTS run_logs_user_day_uq ON run_logs (user_id, run_date);
 """
@@ -61,7 +67,10 @@ class Database:
         self._pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
-        self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=5)
+        # command_timeout: DB 가 응답 불능일 때 코루틴이 무한 대기 → 풀 고갈되는 것을 방지.
+        self._pool = await asyncpg.create_pool(
+            self._dsn, min_size=1, max_size=5, command_timeout=15
+        )
         async with self._pool.acquire() as conn:
             await conn.execute(SCHEMA)
 
@@ -119,29 +128,31 @@ class Database:
         self,
         user_id: int,
         run_date: date,
-        current_streak: int,
-        max_streak: int,
         *,
         distance_km: Decimal | None = None,
         duration_sec: int | None = None,
         pace_sec_per_km: int | None = None,
         calories: int | None = None,
         raw_text: str | None = None,
-    ) -> bool:
-        """실제 뛴 날 1건 반영 (명세 7.1·7.3).
+    ) -> tuple[bool, int]:
+        """실제 뛴 날 1건 반영 (명세 7.1·7.3). runners 를 run_logs 원장으로부터 **재계산**한다.
 
-        runners 갱신과 run_logs 원장 기록을 한 트랜잭션으로 묶어 항상 일관되게 한다.
-        run_logs 는 '뛴 날 1행' 원장이라 취소/되돌리기 재계산의 근거가 된다.
-        OCR 부가정보(거리·시간·페이스·칼로리)는 있으면 채우고 없으면 NULL.
+        - 같은 사용자의 record_run 을 runners 행 `FOR UPDATE` 로 **직렬화** → load→계산→저장
+          사이의 경합(TOCTOU) 제거.
+        - 증분(+1) 대신 원장 전체 재계산이라 **재등록 후 유령 부활·UPDATE-0행 문제도 함께 사라짐**.
+        - OCR 부가정보는 있으면 채우고 없으면 NULL.
 
         Returns:
-            True  = 새로 기록됨.
-            False = 같은 날 이미 기록이 있어 무시(동시 업로드 경합 등). 호출자는 응답을 보내지 않는다.
+            (recorded, current_streak)
+            recorded=False = 같은 날 이미 기록(유니크 충돌, 동시 업로드 등) → 호출자는 응답 생략.
         """
         try:
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
-                    # 원장 INSERT 를 먼저 시도 → 같은 날 유니크 충돌이면 즉시 롤백.
+                    # 같은 사용자의 동시 기록을 직렬화(등록 사용자라 행이 존재).
+                    await conn.execute(
+                        "SELECT 1 FROM runners WHERE user_id = $1 FOR UPDATE", user_id
+                    )
                     await conn.execute(
                         """
                         INSERT INTO run_logs
@@ -156,23 +167,28 @@ class Database:
                         calories,
                         raw_text,
                     )
+                    rows = await conn.fetch(
+                        "SELECT run_date FROM run_logs WHERE user_id = $1", user_id
+                    )
+                    cur, mx, last, total = recompute_from_dates(
+                        [r["run_date"] for r in rows]
+                    )
                     await conn.execute(
                         """
                         UPDATE runners
-                        SET last_run_date = $2,
-                            current_streak = $3,
-                            max_streak = $4,
-                            total_runs = total_runs + 1
+                        SET current_streak = $2, max_streak = $3,
+                            last_run_date = $4, total_runs = $5
                         WHERE user_id = $1
                         """,
                         user_id,
-                        run_date,
-                        current_streak,
-                        max_streak,
+                        cur,
+                        mx,
+                        last,
+                        total,
                     )
-            return True
+            return True, cur
         except asyncpg.UniqueViolationError:
-            return False
+            return False, 0
 
     async def undo_last_run(self, user_id: int) -> tuple[date, int, int] | None:
         """가장 최근 뛴 기록 1건을 취소하고 원장에서 스트릭을 재계산한다.
@@ -183,6 +199,10 @@ class Database:
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # record_run 과 동일 행 잠금으로 직렬화(동시 기록/취소 경합 방지).
+                await conn.execute(
+                    "SELECT 1 FROM runners WHERE user_id = $1 FOR UPDATE", user_id
+                )
                 row = await conn.fetchrow(
                     """
                     DELETE FROM run_logs
@@ -269,13 +289,14 @@ class Database:
 
     async def month_run_metrics(self, user_id: int, year: int, month: int) -> list[dict]:
         """해당 월의 러닝 기록(달력·월합계용)."""
+        # 범위 조건으로 (user_id, run_date) 인덱스를 활용(EXTRACT 는 인덱스 못 탐).
         rows = await self.pool.fetch(
             """
             SELECT run_date, distance_km, duration_sec, calories
             FROM run_logs
             WHERE user_id = $1
-              AND EXTRACT(YEAR FROM run_date) = $2
-              AND EXTRACT(MONTH FROM run_date) = $3
+              AND run_date >= make_date($2, $3, 1)
+              AND run_date < (make_date($2, $3, 1) + INTERVAL '1 month')
             ORDER BY run_date
             """,
             user_id,
@@ -304,8 +325,8 @@ class Database:
             """
             SELECT COUNT(*) FROM run_logs
             WHERE user_id = $1
-              AND EXTRACT(YEAR FROM run_date) = $2
-              AND EXTRACT(MONTH FROM run_date) = $3
+              AND run_date >= make_date($2, $3, 1)
+              AND run_date < (make_date($2, $3, 1) + INTERVAL '1 month')
             """,
             user_id,
             year,

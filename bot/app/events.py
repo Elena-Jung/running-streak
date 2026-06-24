@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, timezone
 from zoneinfo import ZoneInfo
@@ -25,6 +26,18 @@ _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif", ".bmp
 
 # OCR 을 시도할 최대 이미지 크기(디스코드 업로드 한도와 동일선). 초과 시 OCR 만 생략(집계는 정상).
 _MAX_OCR_IMAGE_BYTES = 25 * 1024 * 1024
+
+# 동시 OCR 개수 제한: Tesseract 는 CPU 무겁고 블로킹이라, 여러 명이 동시에 올려도
+# 워커 스레드 수를 묶어 호스트를 보호한다(이벤트 루프는 to_thread 로 비차단).
+_OCR_SEMAPHORE = asyncio.Semaphore(2)
+
+
+async def _run_ocr(image_bytes: bytes):
+    """OCR 을 워커 스레드에서 실행(이벤트 루프 비차단) + 동시 실행 수 제한."""
+    from . import ocr
+
+    async with _OCR_SEMAPHORE:
+        return await asyncio.to_thread(ocr.try_extract, image_bytes)
 
 
 def _has_image(message: discord.Message) -> bool:
@@ -79,48 +92,51 @@ async def handle_message(
     record = await db.load(user_id)
     last_run = record.last_run_date if record else None
     cur = record.current_streak if record else 0
-    cur_max = record.max_streak if record else 0
 
-    new_streak, counted = compute_on_run(last_run, cur, today)
+    _, counted = compute_on_run(last_run, cur, today)
     if not counted:
-        # gap == 0: 오늘 이미 기록됨 → 무음(메시지·반응 모두 없음).
+        # gap <= 0: 오늘 이미 기록/시계이상 → 무음(메시지·반응 모두 없음).
         return
 
-    # 즉시 접수 표시: 느린 OCR 이전에 ✅ 를 달아 사용자에게 빠른 피드백.
-    # (봇에 '반응 추가하기' 권한 필요. 없으면 무시하고 진행.)
+    # 즉시 접수 표시: 느린 OCR 이전에 ✅ 로 빠른 피드백. (권한 없으면 무시)
     try:
         await message.add_reaction("✅")
     except Exception as e:  # noqa: BLE001
         log.warning("리액션 추가 실패(무시): %s", e)
 
-    new_max = max(cur_max, new_streak)
-
-    # 4) OCR 부가정보(거리·시간·페이스·칼로리)는 본류 저장 전에 best-effort 로 뽑아둔다.
+    # 4) OCR 부가정보 — 워커 스레드로 오프로드(이벤트 루프·하트비트 비차단) + 동시 수 제한.
     fields: dict = {}
     raw_text = None
     if config.ocr_enabled:
         att = _first_image(message)
         if att is not None and (att.size or 0) <= _MAX_OCR_IMAGE_BYTES:
             try:
-                from . import ocr
-
                 image_bytes = await att.read()
-                fields, raw_text = ocr.try_extract(image_bytes)
+                fields, raw_text = await _run_ocr(image_bytes)
             except Exception as e:  # noqa: BLE001 — 부가정보 실패는 무해
                 log.warning("첨부 OCR 처리 실패(무시): %s", e)
 
-    # runners 갱신 + run_logs 원장 기록을 한 트랜잭션으로. 원장은 취소/재계산의 근거라 항상 남긴다.
-    recorded = await db.record_run(
-        user_id, today, new_streak, new_max, raw_text=raw_text, **fields
-    )
+    # 5) runners 갱신 + run_logs 원장 기록(트랜잭션, 원장 재계산). 실패 시 ✅→⚠️ 로 알려 거짓 접수 방지.
+    try:
+        recorded, new_streak = await db.record_run(
+            user_id, today, raw_text=raw_text, **fields
+        )
+    except Exception:  # noqa: BLE001 — 저장 실패를 사용자에게 알린다(✅만 남아 오인하는 일 방지)
+        log.exception("record_run 실패")
+        try:
+            me = message.guild.me if message.guild else None
+            if me is not None:
+                await message.remove_reaction("✅", me)
+            await message.add_reaction("⚠️")
+        except Exception as e:  # noqa: BLE001
+            log.warning("실패 표시 리액션 변경 실패: %s", e)
+        return
     if not recorded:
-        # 같은 날 이미 기록됨(거의 동시에 두 장 업로드한 경합 등) → 중복 집계 방지, 무음.
+        # 같은 날 이미 기록됨(동시 업로드 경합 등) → 중복 집계 방지, 무음.
         return
 
-    # 5) 응답 (명세 7.1 / 8). 메시지는 스트릭만 알리고, 누구 기록인지 멘션을 덧붙인다.
-    #    OCR 거리는 신뢰도가 낮아 채널에 노출하지 않고 run_logs 에만 남긴다(부가정보).
-    #    소프트 힌트: OCR 이 4필드를 모두 못 읽었으면(엉뚱한 이미지일 수 있음) 취소 안내만 덧붙인다.
-    #    집계 자체는 막지 않는다 — 명세 2(OCR 이 스트릭을 좌우하지 않음) 준수.
+    # 6) 응답 (명세 7.1 / 8). 스트릭만 알리고 업로더 멘션을 덧붙인다(OCR 거리는 채널 미노출).
+    #    소프트 힌트: OCR 4필드를 모두 못 읽었으면 취소 안내만 덧붙인다(집계는 막지 않음 — 명세 2).
     hint = ""
     if config.ocr_enabled and not any(v is not None for v in fields.values()):
         hint = "\n-# 러닝 정보를 읽지 못했습니다. 잘못 올린 경우 `/달리기 취소` 로 되돌릴 수 있습니다."

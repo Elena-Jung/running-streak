@@ -142,9 +142,9 @@ def extract_pace_sec_per_km(text: str) -> int | None:
 
 
 def extract_calories(text: str) -> int | None:
+    # 모든 매치를 훑어 첫 '유효 범위' 값을 채택 — '0 kcal' 같은 노이즈가 앞서도 건너뛴다.
     for rgx in _CAL_RES:
-        m = rgx.search(text)
-        if m:
+        for m in rgx.finditer(text):
             try:
                 v = int(m.group(1))
             except ValueError:
@@ -191,14 +191,14 @@ def _maybe_upscale(gray):
 
 
 def _preprocess(img):
-    """변형 A: 흑백 → 업스케일 → 대비 보정 (일반 단색 배경에 강함)."""
+    """변형 A: 흑백 → 업스케일 → 대비 보정 (일반 단색 배경에 강함). 실패하면 None."""
     try:
         from PIL import ImageOps
 
         gray = _maybe_upscale(ImageOps.grayscale(img))
         return ImageOps.autocontrast(gray)
     except Exception:  # noqa: BLE001
-        return img
+        return None
 
 
 def _color_variant(img):
@@ -301,9 +301,16 @@ def try_extract(image_bytes: bytes) -> tuple[dict, str | None]:
         import pytesseract
         from PIL import Image
 
+        # 디컴프레션 폭탄 방어: 과도한 픽셀 수면 PIL 이 예외 → 아래 except 가 빈 결과로 처리.
+        Image.MAX_IMAGE_PIXELS = 64_000_000
+
         color = None
         with Image.open(io.BytesIO(image_bytes)) as raw_img:
-            variants = [_preprocess(raw_img)]  # A: 흑백+대비
+            raw_img.load()  # with 종료 전에 픽셀 로드(이후 변형들이 안전)
+            variants = []
+            a = _preprocess(raw_img)  # A: 흑백+대비
+            if a is not None:
+                variants.append(a)
             color = _color_variant(raw_img)  # C: 원본 컬러(컬러 글씨용)
             if color is not None:
                 variants.append(color)

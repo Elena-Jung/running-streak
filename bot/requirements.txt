@@ -1,5 +1,8 @@
-discord.py>=2.4,<3
-asyncpg>=0.29,<0.31
-pytesseract>=0.3.10
-Pillow>=10.2
-pytest>=8.0
+# 재현 가능한 빌드를 위해 버전 고정(검증된 조합). 업그레이드는 의도적으로.
+discord.py==2.7.1
+asyncpg==0.30.0
+pytesseract==0.3.13
+Pillow==12.2.0
+
+# 개발/테스트 전용(런타임 불필요하나 이미지에 포함해 컨테이너서 pytest 실행).
+pytest==9.1.1

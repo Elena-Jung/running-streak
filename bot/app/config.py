@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import quote
 
 
@@ -29,6 +29,16 @@ def _require_int(name: str) -> int:
         raise ConfigError(f"환경변수 {name} 는 정수여야 합니다 (현재값: {raw!r}).") from e
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError as e:
+        raise ConfigError(f"환경변수 {name} 는 정수여야 합니다 (현재값: {raw!r}).") from e
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -38,17 +48,18 @@ def _bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class Config:
-    discord_token: str
-    guild_id: int
-    target_channel_id: int
+    # 비밀값은 repr 에서 제외 → 로그/예외에 토큰·비번이 평문 노출되지 않게.
+    discord_token: str = field(repr=False)
+    guild_id: int = 0
+    target_channel_id: int = 0
 
-    pg_host: str
-    pg_port: int
-    pg_user: str
-    pg_password: str
-    pg_db: str
+    pg_host: str = "db"
+    pg_port: int = 5432
+    pg_user: str = "streak"
+    pg_password: str = field(repr=False, default="")
+    pg_db: str = "streak"
 
-    ocr_enabled: bool
+    ocr_enabled: bool = True
 
     @property
     def dsn(self) -> str:
@@ -64,7 +75,7 @@ def load_config() -> Config:
         guild_id=_require_int("DISCORD_GUILD_ID"),
         target_channel_id=_require_int("TARGET_CHANNEL_ID"),
         pg_host=os.environ.get("POSTGRES_HOST", "db").strip() or "db",
-        pg_port=int(os.environ.get("POSTGRES_PORT", "5432") or "5432"),
+        pg_port=_env_int("POSTGRES_PORT", 5432),
         pg_user=_require("POSTGRES_USER"),
         pg_password=_require("POSTGRES_PASSWORD"),
         pg_db=_require("POSTGRES_DB"),

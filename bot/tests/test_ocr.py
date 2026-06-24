@@ -94,6 +94,11 @@ def test_calories_absurd_value_rejected():
     assert extract_calories("50000 kcal") is None
 
 
+def test_calories_skips_zero_noise_before_real():
+    # '0 kcal' 노이즈가 앞서도 다음 유효값을 잡아야 함(첫 매치만 보지 않음).
+    assert extract_calories("0 kcal ... 320 kcal") == 320
+
+
 # --- 통합: 속도만 있고 거리 없는 화면(합성) -------------------------------
 
 def test_distance_derived_from_time_and_pace():

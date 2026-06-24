@@ -41,6 +41,21 @@ def _fmt_pace(pace_sec) -> str:
     return f"{p // 60}'{p % 60:02d}\"/km"
 
 
+def _chunk_lines(lines: list[str], limit: int = 1900) -> list[str]:
+    """줄 리스트를 limit 자 이하 메시지 여러 개로 나눈다(디스코드 2000자 한도 회피)."""
+    chunks, buf, length = [], [], 0
+    for ln in lines:
+        add = len(ln) + 1
+        if buf and length + add > limit:
+            chunks.append("\n".join(buf))
+            buf, length = [], 0
+        buf.append(ln)
+        length += add
+    if buf:
+        chunks.append("\n".join(buf))
+    return chunks or [""]
+
+
 HELP_TEXT = """## 🏃 러닝 스트릭 봇 사용설명서
 
 지정된 채널에 **러닝 기록 사진**을 올리면, 봇이 자동으로 **연속 러닝 일수(스트릭)** 를 세어 줍니다.
@@ -48,7 +63,7 @@ HELP_TEXT = """## 🏃 러닝 스트릭 봇 사용설명서
 ### 시작하기
 1. `/달리기 등록` — 선수로 등록(딱 한 번만 하면 됩니다).
 2. 지정 채널에 러닝 앱 캡처(또는 러닝 사진)를 업로드.
-3. 봇이 사진에 ✅ 를 달고 `오늘의 러닝 완료! N일째 연속!` 로 답하면 집계 완료!
+3. 봇이 사진에 ✅ 를 달고 `오늘 러닝 기록 완료. N일째 연속입니다.` 로 답하면 집계 완료!
    (✅ 는 접수 표시이고, 잠시 뒤 메시지가 따라옵니다.)
 
 ### 스트릭 규칙
@@ -107,14 +122,13 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
 
     @dalligi.command(name="취소", description="내 가장 최근 러닝 기록 1건을 취소(삭제)합니다.")
     async def cancel(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)  # DELETE+재계산이 3초 넘을 수 있어 먼저 ack
         result = await db.undo_last_run(interaction.user.id)
         if result is None:
-            await interaction.response.send_message(
-                "취소할 기록이 없습니다.", ephemeral=True
-            )
+            await interaction.followup.send("취소할 기록이 없습니다.", ephemeral=True)
             return
         deleted_date, cur, total = result
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"최근 기록(`{deleted_date.isoformat()}`)을 취소하였습니다. "
             f"현재 연속 **{cur}일** · 총 **{total}회**.\n"
             "잘못 올린 기록이라면 올바른 날짜의 사진을 다시 올리십시오.",
@@ -126,9 +140,10 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
     # --- /스트릭 = /기록 (개인 통합 조회, 읽기 전용) ----------------------
     #     스트릭 + 누적 거리·시간·페이스·칼로리를 한 화면에. /기록 은 별칭(같은 출력).
     async def _send_my_stats(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)  # 다중 DB 조회 → 3초 ack 한도 회피
         record = await db.load(interaction.user.id)
         if record is None or not record.registered:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "아직 기록이 없습니다. `/달리기 등록` 후 러닝 사진을 올리십시오.",
                 ephemeral=True,
             )
@@ -145,7 +160,7 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
 
         if record.total_runs == 0:
             lines.append("아직 러닝 기록이 없습니다. 지정 채널에 사진을 올리십시오.")
-            await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            await interaction.followup.send("\n".join(lines), ephemeral=True)
             return
 
         month_count = await db.count_runs_in_month(
@@ -183,7 +198,7 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
             "-# ⚠️ 거리·시간·페이스·칼로리는 사진 자동 인식(OCR) 값이라 정확하지 않을 수 있습니다. "
             "스트릭 집계에는 영향이 없습니다."
         )
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @tree.command(
         name="스트릭",
@@ -238,10 +253,11 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
             lines.append(
                 f"{rank} **{name}** — {eff}일 연속 (최장 {r.max_streak}일){dist_str}"
             )
-        # 이름 표기로 인한 멘션 알림이 울리지 않도록 멘션 비활성화.
-        await interaction.followup.send(
-            "\n".join(lines), allowed_mentions=discord.AllowedMentions.none()
-        )
+        # 인원이 많아 2000자를 넘기면 분할 전송(단일 메시지 한도). 멘션 알림은 비활성화.
+        for chunk in _chunk_lines(lines, 1900):
+            await interaction.followup.send(
+                chunk, allowed_mentions=discord.AllowedMentions.none()
+            )
 
     # --- /캘린더 (월 달력 + 주/월 합계, 읽기 전용·온디맨드) ---------------
     @tree.command(
@@ -249,16 +265,28 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
         description="러닝 달력과 주간·월간 합계를 봅니다.",
         guild=guild,
     )
-    @app_commands.describe(month="조회할 월 (1-12, 생략 시 이번 달)")
-    async def calendar_cmd(interaction: discord.Interaction, month: int | None = None):
+    @app_commands.describe(
+        month="조회할 월 (1-12, 생략 시 이번 달)",
+        year="조회할 연도 (생략 시 자동: 미래 월이면 작년)",
+    )
+    async def calendar_cmd(
+        interaction: discord.Interaction,
+        month: int | None = None,
+        year: int | None = None,
+    ):
+        await interaction.response.defer(ephemeral=True)  # DB 조회 → 3초 ack 회피
         today = _today_kst()
-        year = today.year
         m = today.month if month is None else month
         if not 1 <= m <= 12:
-            await interaction.response.send_message(
-                "월은 1-12 사이로 입력해 주십시오.", ephemeral=True
-            )
+            await interaction.followup.send("월은 1-12 사이로 입력해 주십시오.", ephemeral=True)
             return
+        if year is not None:
+            y = year
+        elif month is None or m <= today.month:
+            y = today.year
+        else:
+            y = today.year - 1  # 올해 아직 안 온 미래 월이면 작년으로 해석
+        year = y
 
         rows = await db.month_run_metrics(interaction.user.id, year, m)
         run_days = {r["run_date"].day for r in rows}
@@ -274,7 +302,7 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
             "`*` = 달린 날",
             f"📊 {m}월 합계: {mcnt}회 · {mdist:.1f}km · {_fmt_duration(mdur)} · {mcal}kcal",
         ]
-        if month is None:  # 이번 달을 볼 때만 '이번 주(월~일)' 합계도 표시
+        if year == today.year and m == today.month:  # 현재 달일 때만 '이번 주(월~일)' 합계
             monday = today - timedelta(days=today.weekday())
             sunday = monday + timedelta(days=6)
             w = await db.period_summary(interaction.user.id, monday, sunday)
@@ -283,7 +311,7 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
                 f"🗓️ 이번 주: {int(w.get('cnt') or 0)}회 · {wdist:.1f}km · "
                 f"{_fmt_duration(w.get('dur') or 0)} · {int(w.get('cal') or 0)}kcal"
             )
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     # --- /도움 (사용설명서) ----------------------------------------------
     @tree.command(name="도움", description="러닝 스트릭 봇 사용설명서를 봅니다.", guild=guild)

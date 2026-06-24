@@ -41,6 +41,19 @@ def build_bot(config, db: Database) -> commands.Bot:
         synced = await bot.tree.sync(guild=guild)
         log.info("슬래시 커맨드 %d개 동기화 완료 (guild=%s)", len(synced), config.guild_id)
 
+    @bot.tree.error
+    async def on_app_command_error(interaction: discord.Interaction, error):
+        # 슬래시 커맨드 콜백에서 처리 안 된 예외 → 사용자에게 일시 오류 안내(무응답/영구 로딩 방지).
+        log.exception("슬래시 커맨드 오류: %s", getattr(error, "original", error))
+        msg = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주십시오."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except Exception as e:  # noqa: BLE001
+            log.warning("오류 안내 전송 실패: %s", e)
+
     @bot.event
     async def on_ready():
         log.info("로그인: %s (id=%s)", bot.user, getattr(bot.user, "id", "?"))

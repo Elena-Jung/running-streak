@@ -3,9 +3,10 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      # 빈 값으로 조용히 잘못된 자격증명으로 뜨지 않도록 필수 마커(:?) 사용.
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER 가 .env 에 필요합니다}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 가 .env 에 필요합니다}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB 가 .env 에 필요합니다}
       TZ: ${TZ:-Asia/Seoul}
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -17,6 +18,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   bot:
     build: ./bot
@@ -31,6 +38,12 @@ services:
     networks:
       - internal
     # 인바운드 포트 없음. 아웃바운드(디스코드)만 사용.
+    mem_limit: 1g  # OCR(이미지 변형 다수)로 인한 메모리 폭주 시 호스트 보호
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   internal:
