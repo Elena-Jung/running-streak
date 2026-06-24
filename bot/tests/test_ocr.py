@@ -85,13 +85,29 @@ def test_calories_absurd_value_rejected():
 
 # --- 통합: 속도만 있고 거리 없는 화면(합성) -------------------------------
 
+def test_distance_derived_from_time_and_pace():
+    # 거리 항목 없는 화면: 시간·페이스로 거리 유도 (780s / 390s/km = 2.00km).
+    text = "운동시간 13:00\n평균 페이스 6:30/km"
+    f = extract_fields(text)
+    assert f["distance_km"] == Decimal("2.00")
+    assert f["duration_sec"] == 780
+    assert f["pace_sec_per_km"] == 390
+
+
+def test_distance_ocr_wins_over_derivation():
+    # 거리 OCR 이 잡히면 유도하지 않고 OCR 값을 쓴다.
+    text = "거리 5.00 km\n운동시간 13:00\n평균 페이스 6:30/km"
+    assert extract_fields(text)["distance_km"] == Decimal("5.00")
+
+
 def test_fields_speed_only_screen_has_no_distance():
     text = (
         "운동 상세정보\n운동시간 평균 페이스\n25:00  6'00\"/km\n"
         "운동 칼로리 평균 케이던스\n200 kcal  160spm\n걸음 평균 속도\n3,000  9.0km/h"
     )
     f = extract_fields(text)
-    assert f["distance_km"] is None            # 9.0km/h 를 거리로 잡지 않음
+    assert f["distance_km"] != Decimal("9.0")      # 9.0km/h(속도)를 거리로 잡지 않음
+    assert f["distance_km"] == Decimal("4.17")     # 거리 항목 없음 → 시간/페이스로 유도(1500/360)
     assert f["duration_sec"] == 25 * 60
     assert f["pace_sec_per_km"] == 6 * 60
     assert f["calories"] == 200

@@ -148,12 +148,27 @@ def extract_calories(text: str) -> int | None:
 
 
 def extract_fields(text: str) -> dict:
-    """4개 부가정보를 한 번에. 못 찾은 항목은 None."""
+    """4개 부가정보를 한 번에. 못 찾은 항목은 None.
+
+    거리 OCR 이 실패했고 시간·페이스가 모두 있으면 거리를 유도한다
+    (distance = time / pace). 거리 항목이 없는 화면(예: 삼성헬스 상세)에서도
+    거리를 채울 수 있고, 시간·페이스가 정확하면 수학적으로 정확하다.
+    """
+    distance = extract_distance_km(text)
+    duration = extract_duration_sec(text)
+    pace = extract_pace_sec_per_km(text)
+    calories = extract_calories(text)
+
+    if distance is None and duration and pace:
+        derived = (Decimal(duration) / Decimal(pace)).quantize(Decimal("0.01"))
+        if Decimal("0") < derived <= Decimal("100"):
+            distance = derived
+
     return {
-        "distance_km": extract_distance_km(text),
-        "duration_sec": extract_duration_sec(text),
-        "pace_sec_per_km": extract_pace_sec_per_km(text),
-        "calories": extract_calories(text),
+        "distance_km": distance,
+        "duration_sec": duration,
+        "pace_sec_per_km": pace,
+        "calories": calories,
     }
 
 
