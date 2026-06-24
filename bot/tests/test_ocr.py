@@ -73,6 +73,17 @@ def test_duration_none_when_only_pace_colon():
     assert extract_duration_sec("평균 페이스 5:30/km") is None
 
 
+def test_duration_excludes_date_line():
+    # 날짜줄의 시각(업로드 시각)을 운동시간으로 잘못 잡으면 안 됨.
+    text = "2026년 6월 10일 (수) 13:35\n운동 시간\n35:00"
+    assert extract_duration_sec(text) == 35 * 60
+
+
+def test_duration_excludes_dotted_date_line():
+    text = "2026.06.21 01:36\n운동 시간 22:19"
+    assert extract_duration_sec(text) == 22 * 60 + 19
+
+
 def test_calories_label_both_directions():
     assert extract_calories("200 kcal") == 200
     assert extract_calories("칼로리\n350") == 350

@@ -38,6 +38,11 @@ _NON_DISTANCE_TAILS = ("kcal", "spm", "bpm", "%")
 # HH:MM:SS 또는 MM:SS. 상태바 시계와 구분하려고 상태바 힌트가 있는 줄은 건너뛴다.
 _TIME_RE = re.compile(r"(?<!\d)(?:(\d{1,2}):)?(\d{1,2}):(\d{2})(?!\d)")
 _STATUS_HINTS = ("kt", "skt", "lg u", "u+", "%", "am", "pm", "배터리", "오전", "오후")
+# 날짜/타임스탬프 줄(예: "2026년 6월 10일 (수) 13:35", "2026.06.21 01:36") — 그 줄의 시각은
+# 운동시간이 아니라 업로드 시각이므로 제외.
+_DATE_LINE_RE = re.compile(
+    r"\d{4}\s*[.\-/년]|오전|오후|\([월화수목금토일]\)|[월화수목금토일]요일", re.IGNORECASE
+)
 
 # ── 페이스 (분'초"/km) ──────────────────────────────────────────────────
 _PACE_RE = re.compile(r"(\d{1,2})\s*['’]\s*(\d{2})\s*(?:[\"”]|'')?")
@@ -101,6 +106,8 @@ def extract_duration_sec(text: str) -> int | None:
     for line in text.splitlines():
         low = line.lower()
         if any(h in low for h in _STATUS_HINTS):
+            continue
+        if _DATE_LINE_RE.search(line):  # 날짜/업로드 시각 줄의 시각은 운동시간 아님
             continue
         for m in _TIME_RE.finditer(line):
             # 뒤에 "/km" 가 붙으면 페이스(예: 5:30/km)이므로 운동시간에서 제외.
@@ -221,6 +228,66 @@ def _bright_text_variant(img):
         return None
 
 
+def _top_hero_variant(img):
+    """변형 D: 상단 45% 크롭 + 업스케일 + 밝은 글씨 이진화.
+
+    삼성헬스 '사진 위 큰 거리 글씨'(예: 5.94 km)가 전체 이미지에선 작아 놓칠 때,
+    상단만 크롭·확대해 읽는다. 실패하면 None.
+    """
+    try:
+        from PIL import Image, ImageOps
+
+        gray = ImageOps.grayscale(img)
+        w, h = gray.size
+        top = gray.crop((0, 0, w, int(h * 0.45)))
+        top = top.resize((top.size[0] * 2, top.size[1] * 2), Image.LANCZOS)
+        return top.point(lambda v: 0 if v > 180 else 255)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _calorie_from_layout(img) -> int | None:
+    """좌표 기반 칼로리(2단 그리드 대응).
+
+    image_to_data 로 '칼로리'/'kcal' 라벨 위치를 찾고, 같은 열에서 가장 가까운 숫자를
+    칼로리로 택한다(런데이 결과화면처럼 값과 라벨이 다른 줄에 있을 때). 실패 시 None.
+    """
+    try:
+        import pytesseract
+
+        d = pytesseract.image_to_data(
+            img, lang="kor+eng", config="--psm 6", output_type=pytesseract.Output.DICT
+        )
+        labels, nums = [], []
+        for i, raw in enumerate(d["text"]):
+            t = raw.strip()
+            if not t:
+                continue
+            if t == "칼로리" or "kcal" in t.lower():
+                labels.append(i)
+            elif t.isdigit() and 1 <= int(t) <= 20000:
+                nums.append((i, int(t)))
+        best, best_score = None, None
+        for li in labels:
+            lcx = d["left"][li] + d["width"][li] / 2
+            lcy = d["top"][li] + d["height"][li] / 2
+            lw = max(d["width"][li], 1)
+            lh = max(d["height"][li], 1)
+            for ni, val in nums:
+                ncx = d["left"][ni] + d["width"][ni] / 2
+                ncy = d["top"][ni] + d["height"][ni] / 2
+                dx = abs(ncx - lcx)
+                dy = abs(ncy - lcy)
+                if dx > lw * 1.3 or dy > lh * 4:  # 같은 열 & 한 행 이내
+                    continue
+                score = dx + dy * 0.2
+                if best_score is None or score < best_score:
+                    best_score, best = score, val
+        return best
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def try_extract(image_bytes: bytes) -> tuple[dict, str | None]:
     """이미지 바이트에서 (부가정보 dict, OCR 원문) 추출. 실패 시 (빈dict, None).
 
@@ -236,14 +303,14 @@ def try_extract(image_bytes: bytes) -> tuple[dict, str | None]:
         import pytesseract
         from PIL import Image
 
+        color = None
         with Image.open(io.BytesIO(image_bytes)) as raw_img:
             variants = [_preprocess(raw_img)]  # A: 일반(흑백)
-            bright = _bright_text_variant(raw_img)  # B: 사진 위 흰 글씨용
-            if bright is not None:
-                variants.append(bright)
             color = _color_variant(raw_img)  # C: 컬러 글씨(분홍 칼로리 등)용
-            if color is not None:
-                variants.append(color)
+            # B: 사진 위 흰 글씨, C: 컬러, D: 상단 히어로 크롭
+            for v in (_bright_text_variant(raw_img), color, _top_hero_variant(raw_img)):
+                if v is not None:
+                    variants.append(v)
 
         texts: list[str] = []
         for img in variants:
@@ -256,7 +323,13 @@ def try_extract(image_bytes: bytes) -> tuple[dict, str | None]:
                     continue
 
         combined = "\n".join(texts).strip()
-        return extract_fields(combined), (combined or None)
+        fields = extract_fields(combined)
+        # 칼로리가 텍스트로 안 잡혔으면(2단 그리드 등) 좌표 기반으로 한 번 더.
+        if fields["calories"] is None and color is not None:
+            cal = _calorie_from_layout(color)
+            if cal is not None:
+                fields["calories"] = cal
+        return fields, (combined or None)
     except Exception as e:  # noqa: BLE001
         log.warning("OCR 추출 실패(무시): %s", e)
         return empty, None
