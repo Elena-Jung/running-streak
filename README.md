@@ -30,6 +30,19 @@
 
 ---
 
+## 셀프 호스팅 (Self-hosting)
+
+이 봇은 호스트 비종속(`.env` 기반)이라 누구나 자신의 디스코드 서버·호스트에 배포할 수 있습니다.
+
+- **사람용 상세 가이드**: [`docs/SELF_HOSTING.md`](docs/SELF_HOSTING.md)
+- **AI 에이전트용 배포 지침**: [`AGENTS.md`](AGENTS.md) — 저장소를 건네받은 에이전트가 자동으로 읽는 파일.
+
+> 비밀값(`DISCORD_TOKEN`, `POSTGRES_PASSWORD`)은 **본인 터미널에서 `.env` 에 직접** 입력하십시오. 채팅·AI 도구에 붙여넣지 마십시오(제3자 서버 경유).
+
+아래 1)~4) 는 (원 서버 기준) 요약 퀵스타트입니다.
+
+---
+
 ## 1) Discord 봇 발급 (최초 1회, 사용자 수동)
 
 1. https://discord.com/developers/applications → **New Application** 생성.

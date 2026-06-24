@@ -21,6 +21,7 @@
 - 원격 저장소: https://github.com/Elena-Jung/running-streak (Public). `.env`·비밀·타인 데이터 미포함.
 - **커밋 가드**: `.githooks/pre-commit` 가 민감 패턴(사설 IP·SSH 설정·개인키·토큰 형태)을 커밋 단계에서 차단. 새 클론은 `git config core.hooksPath .githooks` 1회 설정 필요(우회: `--no-verify`).
 - 운영: `docker compose up -d --build` / `logs -f bot` / `down`. 절차 상세는 `README.md`.
+- **호스트 비종속**: 설정은 전부 `.env`. SRV-1 외 제3자 서버에도 배포 가능 — 사람용 `docs/SELF_HOSTING.md`, 에이전트용 `AGENTS.md`. (SRV-1 관련 기술은 원 배포 기록.)
 
 ## 3. 확정 결정사항 (불변 — 함부로 되돌리지 말 것; 명세 9/12.4.5)
 - **언어**: Python + discord.py. **OCR**: 로컬 Tesseract만(클라우드 OCR/비전 LLM 금지).
@@ -168,3 +169,4 @@
 - **러닝 하루 경계를 KST 자정→04:00 으로 이동**(하절기 새벽 러닝=전날 집계). `to_kst_date`→`to_run_date`(KST 변환 후 4시간 빼고 .date()), `current_run_date()` 도입으로 기록·조회가 동일 논리날짜 기준 사용. 완료 메시지에서 '오늘' 제거 + 새벽 업로드 전날집계 안내, HELP_TEXT·README 04시 규칙 명시, /스트릭 끊김 힌트 '오늘'→'지금'. 과거 데이터 소급 미적용(전진 적용). 다방면 QA(19 에이전트, 14건→10 확정 전부 문서/UX, 코드 정합성·무마이그레이션·UNIQUE는 정상 확인). 테스트 58→65(04시 경계·새벽 안내). 전환 영향 새벽기록 1건 수동 정정(공개 레포엔 식별정보 미기재).
 - 완료 메시지의 새벽(전날 집계) 안내 제거 → **`/스트릭`·`/캘린더`의 subtext로 이동**(매 업로드 노출 대신 조회 화면에서 안내). 테스트 65→64.
 - **삼성헬스 트레드밀(평균 속도 km/h) 화면 대응 + 백계산 엔진**: `extract_speed_kmh` 신규(정수 허용, 1~40), `extract_fields` 를 거리/속력/시간 역산으로 일반화(OCR 미인식 필드만, 코어 우선·속도 폴백, 범위검사). 속도는 페이스로 환산만(DB 컬럼·스키마 무변경). 1단계 명세서 오커밋 방지용 **pre-commit 가드 훅(`.githooks/`)** 추가(사설 IP·SSH 설정·개인키·토큰 형태 차단; `core.hooksPath=.githooks`). 테스트 64→78.
+- **셀프 호스팅 문서 추가**: `docs/SELF_HOSTING.md`(사람용·한국어)·`AGENTS.md`(에이전트용·영어, 레포 건네받은 에이전트가 자동으로 읽는 표준 파일)·README 셀프호스팅 포인터. 제3자 서버 배포 절차 + 비밀값 취급 규칙(토큰/비번 채팅 금지, 운영자가 `.env` 직접 입력) + 로케일/시간대 하드코딩(events.py KST·DAY_RESET_HOUR·Dockerfile TZ) 편집 안내. **봇 코드 변경 없음**. 가이드엔 가드 패턴 리터럴 미포함.
