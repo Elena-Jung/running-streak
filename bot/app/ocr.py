@@ -213,37 +213,35 @@ def _color_variant(img):
         return None
 
 
-def _bright_text_variant(img):
-    """변형 B: 밝은 픽셀만 검은 글씨로 남기는 이진화.
+def _adaptive_variants(img) -> list:
+    """변형 B: 적응형(국소 평균 대비) 이진화 2장 — 밝은 글씨용 / 어두운 글씨용.
 
-    삼성헬스처럼 '사진 위 큰 흰 글씨'(거리)를 읽기 위함. 실패하면 None.
+    고정 임계값이나 위치 크롭에 의존하지 않는다. 각 픽셀을 '주변 평균'과 비교하므로
+    사진 위 흰 히어로 글씨, 카드 위 어두운/컬러 글씨를 **위치·해상도·앱 무관**하게
+    분리해 읽는다(블러 반경을 짧은 변에 비례 → 해상도 무관). 실패하면 빈 리스트.
     """
     try:
-        from PIL import ImageOps
-
-        gray = _maybe_upscale(ImageOps.grayscale(img))
-        # 밝은 픽셀(>임계) → 검정(0), 나머지 → 흰색(255). Tesseract 는 밝은 배경 위 검은 글씨 선호.
-        return gray.point(lambda v: 0 if v > 190 else 255)
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _top_hero_variant(img):
-    """변형 D: 상단 45% 크롭 + 업스케일 + 밝은 글씨 이진화.
-
-    삼성헬스 '사진 위 큰 거리 글씨'(예: 5.94 km)가 전체 이미지에선 작아 놓칠 때,
-    상단만 크롭·확대해 읽는다. 실패하면 None.
-    """
-    try:
-        from PIL import Image, ImageOps
+        from PIL import Image, ImageChops, ImageFilter, ImageOps
 
         gray = ImageOps.grayscale(img)
-        w, h = gray.size
-        top = gray.crop((0, 0, w, int(h * 0.45)))
-        top = top.resize((top.size[0] * 2, top.size[1] * 2), Image.LANCZOS)
-        return top.point(lambda v: 0 if v > 180 else 255)
+        short = min(gray.size)
+        if 0 < short < _TARGET_MIN_SIDE:
+            factor = min(_MAX_UPSCALE, _TARGET_MIN_SIDE / short)
+            gray = gray.resize(
+                (int(gray.size[0] * factor), int(gray.size[1] * factor)), Image.LANCZOS
+            )
+        radius = max(5, int(min(gray.size) / 30))  # 글자보다 충분히 큰 국소 창
+        local_mean = gray.filter(ImageFilter.BoxBlur(radius))
+        contrast = 18  # 국소 평균과의 최소 밝기차
+        bright = ImageChops.subtract(gray, local_mean).point(
+            lambda v: 0 if v > contrast else 255  # 주변보다 밝은(흰) 글씨 → 검정
+        )
+        dark = ImageChops.subtract(local_mean, gray).point(
+            lambda v: 0 if v > contrast else 255  # 주변보다 어두운 글씨 → 검정
+        )
+        return [bright, dark]
     except Exception:  # noqa: BLE001
-        return None
+        return []
 
 
 def _calorie_from_layout(img) -> int | None:
@@ -305,12 +303,11 @@ def try_extract(image_bytes: bytes) -> tuple[dict, str | None]:
 
         color = None
         with Image.open(io.BytesIO(image_bytes)) as raw_img:
-            variants = [_preprocess(raw_img)]  # A: 일반(흑백)
-            color = _color_variant(raw_img)  # C: 컬러 글씨(분홍 칼로리 등)용
-            # B: 사진 위 흰 글씨, C: 컬러, D: 상단 히어로 크롭
-            for v in (_bright_text_variant(raw_img), color, _top_hero_variant(raw_img)):
-                if v is not None:
-                    variants.append(v)
+            variants = [_preprocess(raw_img)]  # A: 흑백+대비
+            color = _color_variant(raw_img)  # C: 원본 컬러(컬러 글씨용)
+            if color is not None:
+                variants.append(color)
+            variants.extend(_adaptive_variants(raw_img))  # B: 적응형 이진화(밝은/어두운)
 
         texts: list[str] = []
         for img in variants:
