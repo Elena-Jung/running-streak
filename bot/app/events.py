@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import discord
@@ -20,6 +20,11 @@ from .streak import compute_on_run
 log = logging.getLogger("events")
 
 KST = ZoneInfo("Asia/Seoul")
+
+# 러닝 '하루'의 경계 시각(KST). 자정이 아니라 04시를 기준으로 날이 바뀐다.
+# 하절기 새벽 러닝(00:00~03:59)을 '전날'의 러닝으로 인정하기 위함(명세 3).
+# 한국시간(Asia/Seoul)은 DST가 없어 고정 +9 → 시간 빼기 연산이 안전하다.
+DAY_RESET_HOUR = 4
 
 # 이미지로 취급할 콘텐츠 타입/확장자.
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif", ".bmp")
@@ -58,11 +63,23 @@ def _first_image(message: discord.Message) -> discord.Attachment | None:
     return None
 
 
-def to_kst_date(dt) -> date:
-    """디스코드 메시지의 created_at(UTC, tz-aware) 을 KST 날짜로 환산 (명세 3)."""
+def to_run_date(dt) -> date:
+    """업로드 시각(UTC, tz-aware) 을 '러닝 하루' 날짜로 환산 (명세 3).
+
+    하루 경계가 자정이 아니라 KST 04:00 이다. 즉 00:00~03:59(KST) 의 새벽 러닝은
+    '전날'의 러닝으로 친다(하절기 새벽 러닝 배려). 구현은 KST 로 옮긴 뒤
+    DAY_RESET_HOUR 만큼 빼고 날짜를 취하는 것과 동치다.
+    예) 06-25 02:00 KST → 06-24, 06-25 04:00 KST → 06-25, 06-25 23:00 KST → 06-25.
+    """
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(KST).date()
+    kst = dt.astimezone(KST)
+    return (kst - timedelta(hours=DAY_RESET_HOUR)).date()
+
+
+def current_run_date() -> date:
+    """지금 시점의 '러닝 하루' 날짜(조회 시점의 today). to_run_date 와 동일 기준."""
+    return to_run_date(datetime.now(timezone.utc))
 
 
 async def handle_message(
@@ -87,7 +104,7 @@ async def handle_message(
         return
 
     user_id = message.author.id
-    today = to_kst_date(message.created_at)
+    today = to_run_date(message.created_at)
 
     record = await db.load(user_id)
     last_run = record.last_run_date if record else None
@@ -140,6 +157,14 @@ async def handle_message(
     hint = ""
     if config.ocr_enabled and not any(v is not None for v in fields.values()):
         hint = "\n-# 러닝 정보를 읽지 못했습니다. 잘못 올린 경우 `/달리기 취소` 로 되돌릴 수 있습니다."
+    # 새벽(00:00~03:59 KST) 업로드는 04시 리셋으로 '전날'에 집계된다. 그 시간대에만 안내를 덧붙여
+    # '오늘'이라는 오해를 막는다(낮 시간대는 기존처럼 간결하게 둔다 — today 가 곧 달력상 오늘).
+    created = message.created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    day_note = ""
+    if created.astimezone(KST).hour < DAY_RESET_HOUR:
+        day_note = f"\n-# 새벽 러닝은 전날({today.month}/{today.day}) 기록으로 집계됩니다(하루 경계 오전 4시)."
     await message.channel.send(
-        f"### 오늘 러닝 기록 완료. {new_streak}일째 연속입니다.\n{message.author.mention}{hint}"
+        f"### 러닝 기록 완료. {new_streak}일째 연속입니다.\n{message.author.mention}{day_note}{hint}"
     )

@@ -5,7 +5,7 @@ asyncio.run 으로 코루틴을 돌려 pytest-asyncio 의존 없이 검증한다
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from app import events
 from app.config import Config
@@ -140,10 +140,10 @@ def test_first_run_counts_and_reacts():
 
 
 def test_same_day_is_silent():
-    today = events.to_kst_date(datetime.now(timezone.utc))
+    m = _img_msg()
+    today = events.to_run_date(m.created_at)  # 메시지 시각과 동일 기준으로 맞춤(경계 플레이크 방지)
     rec = Runner(user_id=100, registered=True, last_run_date=today,
                  current_streak=3, max_streak=3, total_runs=3)
-    m = _img_msg()
     db = FakeDB(record=rec)
     _run(m, db, _cfg())
     assert m.reactions == [] and m.channel.sent == [] and db.record_run_calls == []
@@ -171,3 +171,57 @@ def test_ocr_all_none_adds_hint():
     db = FakeDB(record=None, rr=(True, 1))
     _run(m, db, _cfg(ocr=True))
     assert m.channel.sent and "/달리기 취소" in m.channel.sent[0]
+
+
+# --- 러닝 하루 경계: KST 04시 리셋 (to_run_date) ----------------------------
+#     하루가 자정이 아니라 04:00 에 바뀐다. 00:00~03:59 새벽 러닝은 '전날'로 친다.
+
+def _kst(y, mo, d, h, mi=0):
+    return datetime(y, mo, d, h, mi, tzinfo=events.KST)
+
+
+def test_run_date_dawn_belongs_to_previous_day():
+    assert events.to_run_date(_kst(2026, 6, 25, 0, 0)) == date(2026, 6, 24)   # 자정 직후
+    assert events.to_run_date(_kst(2026, 6, 25, 2, 0)) == date(2026, 6, 24)   # 새벽 2시
+    assert events.to_run_date(_kst(2026, 6, 25, 3, 59)) == date(2026, 6, 24)  # 03:59 (경계 직전)
+
+
+def test_run_date_boundary_4am_is_new_day():
+    assert events.to_run_date(_kst(2026, 6, 25, 4, 0)) == date(2026, 6, 25)   # 정확히 04:00 → 당일
+    assert events.to_run_date(_kst(2026, 6, 25, 4, 1)) == date(2026, 6, 25)
+
+
+def test_run_date_daytime_and_late_night_same_day():
+    assert events.to_run_date(_kst(2026, 6, 25, 12, 0)) == date(2026, 6, 25)   # 정오
+    assert events.to_run_date(_kst(2026, 6, 25, 22, 40)) == date(2026, 6, 25)  # 밤 10시 40분
+    assert events.to_run_date(_kst(2026, 6, 25, 23, 59)) == date(2026, 6, 25)  # 자정 직전
+
+
+def test_run_date_handles_naive_utc_input():
+    # tz 없는 입력은 UTC 로 간주. UTC 17:00 06-24 = KST 02:00 06-25 → 전날(06-24).
+    assert events.to_run_date(datetime(2026, 6, 24, 17, 0)) == date(2026, 6, 24)
+    # UTC 19:00 06-24 = KST 04:00 06-25 → 당일(06-25).
+    assert events.to_run_date(datetime(2026, 6, 24, 19, 0)) == date(2026, 6, 25)
+
+
+def test_current_run_date_matches_to_run_date():
+    # current_run_date 는 to_run_date(now) 의 얇은 래퍼 — 같은 기준을 써야 한다.
+    assert events.current_run_date() == events.to_run_date(datetime.now(timezone.utc))
+
+
+def test_dawn_upload_completion_notes_previous_day():
+    # 새벽(02:00 KST) 업로드 → 전날(06-24)로 집계되므로 완료 메시지에 안내가 붙어야 함.
+    m = _img_msg()
+    m.created_at = _kst(2026, 6, 25, 2, 0)
+    db = FakeDB(record=None, rr=(True, 1))
+    _run(m, db, _cfg())
+    assert m.channel.sent and "전날" in m.channel.sent[0] and "6/24" in m.channel.sent[0]
+
+
+def test_daytime_upload_completion_has_no_dawn_note():
+    # 정오(12:00 KST) 업로드 → 당일 집계. 새벽 안내가 붙지 않아야 함.
+    m = _img_msg()
+    m.created_at = _kst(2026, 6, 25, 12, 0)
+    db = FakeDB(record=None, rr=(True, 1))
+    _run(m, db, _cfg())
+    assert m.channel.sent and "전날" not in m.channel.sent[0] and "1일째 연속" in m.channel.sent[0]

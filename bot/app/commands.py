@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import discord
 from discord import app_commands
@@ -15,14 +15,15 @@ from discord import app_commands
 from . import charts
 from .config import Config
 from .db import Database
-from .events import KST
+from .events import current_run_date
 from .streak import effective_streak
 
 log = logging.getLogger("commands")
 
 
-def _today_kst():
-    return datetime.now(KST).date()
+def _today_run_date():
+    """조회 기준 'today' = 러닝 하루(KST 04시 리셋). 기록·조회가 같은 기준을 쓰게 한다."""
+    return current_run_date()
 
 
 def _fmt_duration(total_sec) -> str:
@@ -63,11 +64,12 @@ HELP_TEXT = """## 🏃 러닝 스트릭 봇 사용설명서
 ### 시작하기
 1. `/달리기 등록` — 선수로 등록(딱 한 번만 하면 됩니다).
 2. 지정 채널에 러닝 앱 캡처(또는 러닝 사진)를 업로드.
-3. 봇이 사진에 ✅ 를 달고 `오늘 러닝 기록 완료. N일째 연속입니다.` 로 답하면 집계 완료!
+3. 봇이 사진에 ✅ 를 달고 `러닝 기록 완료. N일째 연속입니다.` 로 답하면 집계 완료!
    (✅ 는 접수 표시이고, 잠시 뒤 메시지가 따라옵니다.)
 
 ### 스트릭 규칙
 - 날짜 기준은 **사진을 올린 시각(한국시간)** 입니다. (사진 속 날짜가 아님)
+- **하루의 경계는 자정이 아니라 새벽 4시(한국시간)** 입니다. 즉 **0시~새벽 4시 사이의 러닝은 "전날" 기록으로 집계**됩니다(밤늦게·새벽에 뛰는 분 배려).
 - **마지막 러닝 이후 3일 이내**에 다시 뛰면 스트릭이 **유지**되고, **4일 이상** 비면 **리셋**됩니다.
 - **실제 뛴 날만** 1씩 올라갑니다. 쉰 날은 세지 않습니다.
 - 같은 날 여러 번 올려도 **하루 1회**만 집계됩니다.
@@ -149,10 +151,10 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
             )
             return
 
-        today = _today_kst()
+        today = _today_run_date()
         eff = effective_streak(record.last_run_date, record.current_streak, today)
         name = interaction.user.display_name
-        broken = "" if eff > 0 else "  _(끊김 — 오늘 다시 달리면 1일째!)_"
+        broken = "" if eff > 0 else "  _(끊김 — 지금 다시 달리면 1일째부터!)_"
         lines = [
             f"## 🏃 {name} 님의 러닝 기록",
             f"🔥 현재 연속 **{eff}일**{broken}  ·  🏆 최장 {record.max_streak}일",
@@ -225,7 +227,7 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
     async def leaderboard_cmd(interaction: discord.Interaction):
         await interaction.response.defer()  # 멤버 조회로 약간 지연될 수 있음
         runners = await db.list_registered()
-        today = _today_kst()
+        today = _today_run_date()
         dist_totals = await db.distance_totals()  # user_id -> 누적 거리(km)
 
         ranked = sorted(
@@ -275,7 +277,7 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
         year: int | None = None,
     ):
         await interaction.response.defer(ephemeral=True)  # DB 조회 → 3초 ack 회피
-        today = _today_kst()
+        today = _today_run_date()
         m = today.month if month is None else month
         if not 1 <= m <= 12:
             await interaction.followup.send("월은 1-12 사이로 입력해 주십시오.", ephemeral=True)
