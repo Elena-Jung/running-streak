@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import discord
 from discord import app_commands
 
+from . import charts
 from .config import Config
 from .db import Database
 from .events import KST
@@ -60,7 +61,8 @@ HELP_TEXT = """## 🏃 러닝 스트릭 봇 사용설명서
 - `/달리기 등록` — 선수 등록(옵트인)
 - `/달리기 해제` — 등록 취소 (기록은 보존)
 - `/달리기 취소` — 내 **가장 최근 기록 1건** 되돌리기 (잘못 올렸을 때)
-- `/스트릭` (또는 `/기록`) — 내 러닝 기록: 연속·최장·이번 달 + 누적 거리·시간·페이스·칼로리
+- `/스트릭` (또는 `/기록`) — 내 러닝 기록: 연속·최장·이번 달 + 누적 거리·시간·페이스·칼로리 + 페이스 추세 그래프
+- `/캘린더` — 러닝 달력(월별) + 주간·월간 합계
 - `/리더보드` — 등록 선수들의 스트릭 랭킹
 - `/도움` — 이 설명서
 
@@ -160,6 +162,17 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
             f"⚡ 평균 페이스 {_fmt_pace(s.get('pace_avg'))}  ·  🔥 총 칼로리 {int(s.get('cal_sum') or 0)}kcal",
             f"🕒 마지막 러닝: {last}",
         ]
+
+        # 성장 추세: 최근 러닝들의 페이스 스파크라인(페이스는 작을수록 빠름 → 부호 뒤집어 우상향=개선).
+        paces = [
+            r["pace_sec_per_km"]
+            for r in await db.recent_runs(interaction.user.id, 12)
+            if r["pace_sec_per_km"] is not None
+        ]
+        spark = charts.sparkline([-p for p in paces])
+        if spark:
+            lines.append(f"📈 페이스 추세(최근 {len(paces)}회, 높을수록 빠름): `{spark}`")
+
         if (s.get("dist_n") or 0) < runs or (s.get("cal_n") or 0) < runs:
             lines.append(
                 f"-# OCR 인식 기준 — 거리 {s.get('dist_n') or 0}/{runs}, "
@@ -229,6 +242,48 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
         await interaction.followup.send(
             "\n".join(lines), allowed_mentions=discord.AllowedMentions.none()
         )
+
+    # --- /캘린더 (월 달력 + 주/월 합계, 읽기 전용·온디맨드) ---------------
+    @tree.command(
+        name="캘린더",
+        description="러닝 달력과 주간·월간 합계를 봅니다.",
+        guild=guild,
+    )
+    @app_commands.describe(month="조회할 월 (1-12, 생략 시 이번 달)")
+    async def calendar_cmd(interaction: discord.Interaction, month: int | None = None):
+        today = _today_kst()
+        year = today.year
+        m = today.month if month is None else month
+        if not 1 <= m <= 12:
+            await interaction.response.send_message(
+                "월은 1-12 사이로 입력해 주십시오.", ephemeral=True
+            )
+            return
+
+        rows = await db.month_run_metrics(interaction.user.id, year, m)
+        run_days = {r["run_date"].day for r in rows}
+        cal_text = charts.month_calendar(year, m, run_days)
+        mcnt = len(rows)
+        mdist = float(sum((r["distance_km"] or 0) for r in rows))
+        mdur = sum((r["duration_sec"] or 0) for r in rows)
+        mcal = sum((r["calories"] or 0) for r in rows)
+
+        lines = [
+            f"## 📅 {year}년 {m}월 러닝 달력",
+            f"```\n{cal_text}\n```",
+            "`*` = 달린 날",
+            f"📊 {m}월 합계: {mcnt}회 · {mdist:.1f}km · {_fmt_duration(mdur)} · {mcal}kcal",
+        ]
+        if month is None:  # 이번 달을 볼 때만 '이번 주(월~일)' 합계도 표시
+            monday = today - timedelta(days=today.weekday())
+            sunday = monday + timedelta(days=6)
+            w = await db.period_summary(interaction.user.id, monday, sunday)
+            wdist = float(w.get("dist") or 0)
+            lines.append(
+                f"🗓️ 이번 주: {int(w.get('cnt') or 0)}회 · {wdist:.1f}km · "
+                f"{_fmt_duration(w.get('dur') or 0)} · {int(w.get('cal') or 0)}kcal"
+            )
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     # --- /도움 (사용설명서) ----------------------------------------------
     @tree.command(name="도움", description="러닝 스트릭 봇 사용설명서를 봅니다.", guild=guild)

@@ -254,6 +254,51 @@ class Database:
         )
         return {r["user_id"]: r["dist"] for r in rows if r["dist"] is not None}
 
+    async def recent_runs(self, user_id: int, limit: int = 12) -> list[dict]:
+        """최근 러닝 N건(오래된→최신 순). 성장 추세(스파크라인)용."""
+        rows = await self.pool.fetch(
+            """
+            SELECT run_date, distance_km, duration_sec, pace_sec_per_km, calories
+            FROM run_logs WHERE user_id = $1
+            ORDER BY run_date DESC, id DESC LIMIT $2
+            """,
+            user_id,
+            limit,
+        )
+        return [dict(r) for r in reversed(rows)]
+
+    async def month_run_metrics(self, user_id: int, year: int, month: int) -> list[dict]:
+        """해당 월의 러닝 기록(달력·월합계용)."""
+        rows = await self.pool.fetch(
+            """
+            SELECT run_date, distance_km, duration_sec, calories
+            FROM run_logs
+            WHERE user_id = $1
+              AND EXTRACT(YEAR FROM run_date) = $2
+              AND EXTRACT(MONTH FROM run_date) = $3
+            ORDER BY run_date
+            """,
+            user_id,
+            year,
+            month,
+        )
+        return [dict(r) for r in rows]
+
+    async def period_summary(self, user_id: int, start_date: date, end_date: date) -> dict:
+        """기간 합계(주간 등). start_date~end_date 포함."""
+        row = await self.pool.fetchrow(
+            """
+            SELECT count(*) AS cnt, sum(distance_km) AS dist,
+                   sum(duration_sec) AS dur, sum(calories) AS cal
+            FROM run_logs
+            WHERE user_id = $1 AND run_date >= $2 AND run_date <= $3
+            """,
+            user_id,
+            start_date,
+            end_date,
+        )
+        return dict(row) if row else {}
+
     async def count_runs_in_month(self, user_id: int, year: int, month: int) -> int:
         val = await self.pool.fetchval(
             """
