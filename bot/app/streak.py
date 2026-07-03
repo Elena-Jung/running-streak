@@ -97,3 +97,16 @@ def effective_streak(
     if gap > GRACE_MAX_GAP:
         return 0  # 이미 끊김
     return current_streak
+
+
+# --- 자랑 카드 마일스톤 --------------------------------------------------
+# 연속 10일마다(10·20·30…) 티어 부여. events(완료 메시지 권유)와 commands(/자랑)가
+# 함께 쓰므로, 양쪽이 임포트하는 이 순수 모듈에 둔다(commands→events 순환 회피).
+MILESTONE_STEP = 10
+
+
+def highest_milestone(streak: int) -> int | None:
+    """streak 이하 최대 마일스톤 티어(10 단위 내림). 10 미만이면 None."""
+    if streak < MILESTONE_STEP:
+        return None
+    return (streak // MILESTONE_STEP) * MILESTONE_STEP

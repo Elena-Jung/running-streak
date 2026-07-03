@@ -16,7 +16,7 @@ import discord
 
 from .config import Config
 from .db import Database
-from .streak import compute_on_run
+from .streak import MILESTONE_STEP, compute_on_run
 
 log = logging.getLogger("events")
 
@@ -185,8 +185,15 @@ async def handle_message(
     hint = ""
     if ocr_attempted and not any(v is not None for v in fields.values()):
         hint = "\n-# 러닝 정보를 읽지 못했습니다. 잘못 올린 경우 `/달리기 취소` 로 되돌릴 수 있습니다."
+    # 마일스톤(연속 10일마다) '달성 당일'에만 /자랑 권유 한 줄을 덧붙인다.
+    # 사진 이벤트에 대한 응답이므로 스케줄러/푸시 알림이 아니다(DESIGN §3 예외 범위).
+    milestone = ""
+    if new_streak >= MILESTONE_STEP and new_streak % MILESTONE_STEP == 0:
+        milestone = (
+            f"\n🎉 연속 **{new_streak}일** 달성! `/자랑` 으로 자랑 카드를 만들어 보십시오."
+        )
     # 완료 메시지는 간결하게 유지한다. 04시 경계(새벽 러닝=전날) 설명은 매번 띄우지 않고
     # /스트릭·/캘린더 안내로 옮겼다(사용자 결정 2026-06-25).
     await message.channel.send(
-        f"### 러닝 기록 완료. {new_streak}일째 연속입니다.\n{message.author.mention}{hint}"
+        f"### 러닝 기록 완료. {new_streak}일째 연속입니다.\n{message.author.mention}{milestone}{hint}"
     )

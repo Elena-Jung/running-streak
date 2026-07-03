@@ -18,7 +18,7 @@ from . import charts
 from .config import Config
 from .db import Database
 from .events import current_run_date
-from .streak import effective_streak
+from .streak import MILESTONE_STEP, effective_streak, highest_milestone
 
 log = logging.getLogger("commands")
 
@@ -42,16 +42,6 @@ def _fmt_pace(pace_sec) -> str:
         return "—"
     p = int(round(float(pace_sec)))
     return f"{p // 60}'{p % 60:02d}\"/km"
-
-
-# 자랑 카드 마일스톤 티어(연속 일수). '현재 진행 스트릭' 기준으로 판정한다.
-MILESTONES = (10, 25, 50, 100)
-
-
-def highest_milestone(streak: int) -> int | None:
-    """streak 이하 최대 마일스톤 티어. 어느 티어에도 못 미치면 None."""
-    reached = [m for m in MILESTONES if streak >= m]
-    return max(reached) if reached else None
 
 
 def build_brag_url(
@@ -124,7 +114,7 @@ HELP_TEXT = """## 🏃 러닝 스트릭 봇 사용설명서
 - `/스트릭` (또는 `/기록`) — 내 러닝 기록: 연속·최장·이번 달 + 누적 거리·시간·페이스·칼로리 + 페이스 추세 그래프
 - `/캘린더 [월] [연도]` — 러닝 달력 + 주간·월간 합계 (`월`·`연도` 생략 시 이번 달; 과거 달·연도도 조회 가능)
 - `/리더보드` — 등록 선수들의 스트릭 랭킹
-- `/자랑` — 마일스톤(10·25·50·100일 연속) 달성 시, 배경 사진에 기록을 얹은 자랑 카드 만들기
+- `/자랑` — 마일스톤(연속 10일마다: 10·20·30…) 달성 시, 배경 사진에 기록을 얹은 자랑 카드 만들기
 - `/도움` — 이 설명서
 
 ### 참고
@@ -294,11 +284,11 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
         await _send_my_stats(interaction)
 
     # --- /자랑 (마일스톤 자랑 카드 링크, 읽기 전용·pull) -------------------
-    #     현재 스트릭이 10/25/50/100 을 넘으면, 통계를 프래그먼트에 담은 정적 카드 페이지
-    #     링크를 '본인에게만' 회신한다. 서버·DB 에 새로 저장하는 것은 없다.
+    #     현재 스트릭이 10일 단위 마일스톤(10·20·30…)에 닿으면, 통계를 프래그먼트에 담은
+    #     정적 카드 페이지 링크를 '본인에게만' 회신한다. 서버·DB 에 새로 저장하는 것은 없다.
     @tree.command(
         name="자랑",
-        description="스트릭 마일스톤(10/25/50/100일 연속) 자랑 카드를 만듭니다.",
+        description="스트릭 마일스톤(연속 10일마다) 자랑 카드를 만듭니다.",
         guild=guild,
     )
     async def brag_cmd(interaction: discord.Interaction):
@@ -316,7 +306,7 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
         tier = highest_milestone(eff)
         if tier is None:
             await interaction.followup.send(
-                f"현재 연속 **{eff}일** 입니다. **{MILESTONES[0]}일 연속**부터 자랑 카드를 만들 수 있습니다. "
+                f"현재 연속 **{eff}일** 입니다. **{MILESTONE_STEP}일 연속**부터 자랑 카드를 만들 수 있습니다. "
                 "조금만 더 달려 보십시오! 🏃",
                 ephemeral=True,
             )

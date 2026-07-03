@@ -259,3 +259,26 @@ def test_oversize_image_no_ocr_hint():
     _run(m, db, _cfg(ocr=True))
     assert m.channel.sent and "1일째 연속" in m.channel.sent[0]
     assert "읽지 못했습니다" not in m.channel.sent[0]
+
+
+# --- 마일스톤(연속 10일마다) 달성 당일 /자랑 권유 ---------------------------
+
+def test_milestone_day_suggests_brag():
+    # 10·20·30… 을 찍는 그 날의 완료 메시지에만 /자랑 권유가 붙는다.
+    for streak in (10, 20, 130):
+        m = _img_msg()
+        db = FakeDB(record=None, rr=(True, streak))
+        _run(m, db, _cfg())
+        events._LAST_HANDLED.clear()  # 쿨다운 해제(같은 테스트 안 반복 호출)
+        assert m.channel.sent and "/자랑" in m.channel.sent[0], streak
+        assert f"{streak}일" in m.channel.sent[0]
+
+
+def test_non_milestone_day_no_brag_suggestion():
+    # 마일스톤이 아닌 날(9·11·25일째 등)에는 권유가 붙지 않는다(완료 메시지 간결 유지).
+    for streak in (1, 9, 11, 25):
+        m = _img_msg()
+        db = FakeDB(record=None, rr=(True, streak))
+        _run(m, db, _cfg())
+        events._LAST_HANDLED.clear()
+        assert m.channel.sent and "/자랑" not in m.channel.sent[0], streak
