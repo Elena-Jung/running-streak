@@ -42,13 +42,13 @@ def _frag(url: str) -> dict:
 def test_build_brag_url_all_fields():
     url = build_brag_url(
         "https://run.example.org",
-        streak=27, tier=25, dist_km=123.456, dur_sec=36000, pace_sec=291.6,
+        streak=27, tier=20, dist_km=123.456, dur_sec=36000, pace_sec=291.6,
         runs=30, name="테스트 러너",
     )
     assert url.startswith("https://run.example.org/#")
     f = _frag(url)
     assert f["streak"] == ["27"]
-    assert f["tier"] == ["25"]
+    assert f["tier"] == ["20"]
     assert f["runs"] == ["30"]
     assert f["dist"] == ["123.46"]   # 소수 2자리
     assert f["time"] == ["36000"]
