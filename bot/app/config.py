@@ -62,6 +62,9 @@ class Config:
     ocr_enabled: bool = True
     # 킬스위치/유지보수 모드: True 면 사진 업로드 집계를 즉시 중단(조회 커맨드는 동작).
     paused: bool = False
+    # 마일스톤 "자랑 카드" 정적 페이지 주소(예 https://run.example.org). 비어 있으면
+    # /자랑 은 링크 대신 통계를 텍스트로만 안내한다(서버 저장·전송 없는 순수 정적 페이지).
+    brag_base_url: str = ""
 
     @property
     def dsn(self) -> str:
@@ -83,4 +86,5 @@ def load_config() -> Config:
         pg_db=_require("POSTGRES_DB"),
         ocr_enabled=_bool("OCR_ENABLED", True),
         paused=_bool("BOT_PAUSED", False),
+        brag_base_url=os.environ.get("BRAG_BASE_URL", "").strip(),
     )

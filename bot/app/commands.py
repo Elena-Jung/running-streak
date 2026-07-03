@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
+from urllib.parse import urlencode
 
 import discord
 from discord import app_commands
@@ -41,6 +42,46 @@ def _fmt_pace(pace_sec) -> str:
         return "—"
     p = int(round(float(pace_sec)))
     return f"{p // 60}'{p % 60:02d}\"/km"
+
+
+# 자랑 카드 마일스톤 티어(연속 일수). '현재 진행 스트릭' 기준으로 판정한다.
+MILESTONES = (10, 25, 50, 100)
+
+
+def highest_milestone(streak: int) -> int | None:
+    """streak 이하 최대 마일스톤 티어. 어느 티어에도 못 미치면 None."""
+    reached = [m for m in MILESTONES if streak >= m]
+    return max(reached) if reached else None
+
+
+def build_brag_url(
+    base: str,
+    *,
+    streak: int,
+    tier: int,
+    dist_km=None,
+    dur_sec=None,
+    pace_sec=None,
+    runs: int = 0,
+    name: str = "",
+) -> str:
+    """자랑 카드 정적 페이지 URL을 만든다.
+
+    통계는 쿼리스트링이 아니라 **프래그먼트(#)** 에 담는다 → 브라우저가 서버로 전송하지 않으므로
+    웹서버/프록시 접근 로그에도 남지 않는다(개인정보 최소화). None 통계는 생략한다.
+    """
+    params: dict[str, str] = {"streak": str(int(streak)), "tier": str(int(tier))}
+    if runs:
+        params["runs"] = str(int(runs))
+    if dist_km is not None:
+        params["dist"] = f"{float(dist_km):.2f}"
+    if dur_sec is not None:
+        params["time"] = str(int(dur_sec))
+    if pace_sec is not None:
+        params["pace"] = str(int(round(float(pace_sec))))
+    if name:
+        params["name"] = name
+    return f"{base.rstrip('/')}/#{urlencode(params)}"
 
 
 def _chunk_lines(lines: list[str], limit: int = 1900) -> list[str]:
@@ -83,6 +124,7 @@ HELP_TEXT = """## 🏃 러닝 스트릭 봇 사용설명서
 - `/스트릭` (또는 `/기록`) — 내 러닝 기록: 연속·최장·이번 달 + 누적 거리·시간·페이스·칼로리 + 페이스 추세 그래프
 - `/캘린더 [월] [연도]` — 러닝 달력 + 주간·월간 합계 (`월`·`연도` 생략 시 이번 달; 과거 달·연도도 조회 가능)
 - `/리더보드` — 등록 선수들의 스트릭 랭킹
+- `/자랑` — 마일스톤(10·25·50·100일 연속) 달성 시, 배경 사진에 기록을 얹은 자랑 카드 만들기
 - `/도움` — 이 설명서
 
 ### 참고
@@ -250,6 +292,88 @@ def setup_commands(bot: discord.Client, db: Database, config: Config) -> None:
     )
     async def records_cmd(interaction: discord.Interaction):
         await _send_my_stats(interaction)
+
+    # --- /자랑 (마일스톤 자랑 카드 링크, 읽기 전용·pull) -------------------
+    #     현재 스트릭이 10/25/50/100 을 넘으면, 통계를 프래그먼트에 담은 정적 카드 페이지
+    #     링크를 '본인에게만' 회신한다. 서버·DB 에 새로 저장하는 것은 없다.
+    @tree.command(
+        name="자랑",
+        description="스트릭 마일스톤(10/25/50/100일 연속) 자랑 카드를 만듭니다.",
+        guild=guild,
+    )
+    async def brag_cmd(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)  # DB 다중 조회 → 3초 ack 회피
+        record = await db.load(interaction.user.id)
+        if record is None or not record.registered:
+            await interaction.followup.send(
+                "아직 기록이 없습니다. `/달리기 등록` 후 러닝 사진을 올리십시오.",
+                ephemeral=True,
+            )
+            return
+
+        today = _today_run_date()
+        eff = effective_streak(record.last_run_date, record.current_streak, today)
+        tier = highest_milestone(eff)
+        if tier is None:
+            await interaction.followup.send(
+                f"현재 연속 **{eff}일** 입니다. **{MILESTONES[0]}일 연속**부터 자랑 카드를 만들 수 있습니다. "
+                "조금만 더 달려 보십시오! 🏃",
+                ephemeral=True,
+            )
+            return
+
+        s = await db.stats(interaction.user.id)
+        runs = int(s.get("runs") or 0)
+        dist_sum = s.get("dist_sum")
+        dur_sum = s.get("dur_sum")
+        # 평균 페이스: 거리·시간이 '둘 다' 인식된 기록만 짝지은 총시간/총거리(가중·자기일관) 우선.
+        # (dist_sum/dur_sum 은 서로 다른 행 집합을 합산할 수 있어 직접 나누면 왜곡 — db.stats 참고.)
+        pace_sec = None
+        p_dist, p_dur = s.get("paired_dist"), s.get("paired_dur")
+        if p_dist is not None and p_dur is not None and float(p_dist) > 0:
+            pace_sec = float(p_dur) / float(p_dist)
+        elif s.get("pace_avg") is not None:
+            pace_sec = float(s["pace_avg"])
+
+        dist_txt = f"{float(dist_sum):.2f}km" if dist_sum is not None else "—"
+        dur_txt = _fmt_duration(dur_sum) if dur_sum is not None else "—"
+        stat_line = (
+            f"🔥 현재 연속 **{eff}일** · **{tier}일 마일스톤 달성**\n"
+            f"📏 총 거리 {dist_txt} · ⏱️ 총 시간 {dur_txt} · "
+            f"⚡ 평균 페이스 {_fmt_pace(pace_sec)}"
+        )
+
+        if not config.brag_base_url:  # URL 미설정 → 텍스트 폴백
+            await interaction.followup.send(
+                f"## 🎉 {tier}일 연속 달성!\n{stat_line}\n"
+                "-# 자랑 카드 페이지 주소(`BRAG_BASE_URL`)가 설정되지 않아 링크를 만들지 못했습니다.",
+                ephemeral=True,
+            )
+            return
+
+        url = build_brag_url(
+            config.brag_base_url,
+            streak=eff,
+            tier=tier,
+            dist_km=dist_sum,
+            dur_sec=dur_sum,
+            pace_sec=pace_sec,
+            runs=runs,
+            name=interaction.user.display_name,
+        )
+        lines = [
+            f"## 🎉 {tier}일 연속 달성! 자랑 카드를 만들어 보십시오.",
+            stat_line,
+            f"👉 <{url}>",
+            "-# 링크를 열어 배경 사진을 고르고 **이미지로 저장**하면 됩니다. "
+            "통계는 URL 조각(#)에만 담겨 서버로 전송·저장되지 않으며, 이 링크는 나에게만 보입니다.",
+        ]
+        if (s.get("dist_n") or 0) < runs or (s.get("dur_n") or 0) < runs:
+            lines.append(
+                f"-# 거리·시간은 OCR 인식된 기록 기준(거리 {s.get('dist_n') or 0}/{runs} · "
+                f"시간 {s.get('dur_n') or 0}/{runs}회)이라 실제보다 적을 수 있습니다."
+            )
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     # --- /리더보드 (읽기 전용) -------------------------------------------
     @tree.command(

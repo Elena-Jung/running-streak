@@ -35,9 +35,11 @@ The behavioral source of truth is `DESIGN.md` (see §3 "확정 결정사항 / im
 ## Configuration surface (env-driven)
 
 Required (the bot will not start without these): `DISCORD_TOKEN`, `DISCORD_GUILD_ID`, `TARGET_CHANNEL_ID`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`.
-Optional with defaults: `POSTGRES_HOST=db`, `POSTGRES_PORT=5432`, `OCR_ENABLED=true`, `TZ=Asia/Seoul`, `BOT_PAUSED=false` (kill switch — set `true` to halt aggregation immediately; query commands still work).
+Optional with defaults: `POSTGRES_HOST=db`, `POSTGRES_PORT=5432`, `OCR_ENABLED=true`, `TZ=Asia/Seoul`, `BOT_PAUSED=false` (kill switch — set `true` to halt aggregation immediately; query commands still work), `BRAG_BASE_URL=` (empty; base URL of the `/자랑` milestone brag-card page — see below).
 Note: psql inside the db container needs its env, so wrap it: `docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "..."'` (a bare host-shell `$POSTGRES_USER` expands empty). Users can self-delete all their data with `/달리기 전체삭제`; only the four OCR-derived numbers are stored (no image, no raw OCR text).
 `docker-compose.yml` runs two services: `db` (postgres:16-alpine, **no published host port**, named volume `pgdata`) and `bot` (built from `./bot`). Slash commands are synced guild-scoped to `DISCORD_GUILD_ID`.
+
+**Optional: `/자랑` brag-card page.** `web/index.html` is a self-contained static milestone-card generator (pure HTML+canvas, zero external requests). It is **not** part of the bot/db stack — serve `web/` with any static host or reverse proxy and point `BRAG_BASE_URL` at that address (e.g. `https://run.example.org`). It stores nothing server-side: the photo never leaves the browser, and stats travel only in the URL `#` fragment (never sent to the server, not logged). If `BRAG_BASE_URL` is unset, `/자랑` degrades to a text-only stats reply — so this is purely optional and needs no new container. Do not add a DB column or upload store for it; that would violate the data-minimization rule (DESIGN §7).
 
 ---
 

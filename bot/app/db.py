@@ -279,7 +279,12 @@ class Database:
                 avg(pace_sec_per_km)      AS pace_avg,
                 count(pace_sec_per_km)    AS pace_n,
                 sum(calories)             AS cal_sum,
-                count(calories)           AS cal_n
+                count(calories)           AS cal_n,
+                -- 가중 평균 페이스(총시간/총거리)용: 거리·시간이 '둘 다' 인식된 행만 짝지어 합산.
+                -- (각 sum 은 NULL 을 독립적으로 건너뛰므로, 그냥 dur_sum/dist_sum 은 서로 다른
+                --  행 집합을 나누게 되어 페이스가 왜곡될 수 있다.)
+                sum(distance_km)  FILTER (WHERE distance_km IS NOT NULL AND duration_sec IS NOT NULL) AS paired_dist,
+                sum(duration_sec) FILTER (WHERE distance_km IS NOT NULL AND duration_sec IS NOT NULL) AS paired_dur
             FROM run_logs
             WHERE user_id = $1
             """,

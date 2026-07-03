@@ -85,6 +85,7 @@ cp .env.example .env
 - `POSTGRES_USER`/`POSTGRES_DB` — 그대로 둬도 됩니다(기본 `streak`).
 - `TZ`, `OCR_ENABLED` — 보통 기본값 유지.
 - `BOT_PAUSED` — 킬스위치. `true` 면 사진 집계를 즉시 중단(조회 커맨드는 동작). 평소 `false`.
+- `BRAG_BASE_URL` — (선택) 마일스톤 자랑 카드(`/자랑`) 페이지 주소. `web/` 을 정적으로 서빙한 주소를 넣습니다(§5.3). 비워 두면 `/자랑` 은 링크 대신 통계 텍스트만 보여줍니다.
 
 > `.env` 는 `.gitignore` 로 보호되어 **절대 커밋되지 않습니다**. 추적 대상은 `.env.example`(플레이스홀더)뿐입니다.
 
@@ -116,6 +117,23 @@ cp .env.example .env
 
 > 모든 코드 편집 후에는 **반드시 재빌드**해야 반영됩니다(소스가 이미지에 `COPY` 되며 볼륨 마운트가 아님):
 > `docker compose build bot && docker compose up -d`
+
+### 5.3 (선택) 자랑 카드 페이지 서빙 — `/자랑`
+
+`web/index.html` 은 **마일스톤 자랑 카드 생성기**입니다. 외부 요청이 없는 순수 정적 파일 하나(HTML+JS)라,
+봇/DB 컨테이너와 무관하게 **아무 정적 호스트로 서빙**하면 됩니다. 서버에 저장되는 데이터는 없습니다
+(사진은 브라우저 안에서만 처리, 통계는 URL 조각 `#` 에만 실려 서버로 전송되지 않음).
+
+1. `web/` 폴더를 공개 주소로 서빙합니다. 방법은 자유입니다:
+   - 이미 리버스 프록시(Caddy/nginx/Traefik 등)가 있다면 `web/` 을 한 사이트/경로의 문서 루트로 지정.
+   - 예) Caddy 한 블록: `example.org { root * /path/to/repo/web; file_server }`.
+   - 간단히 테스트만 할 땐 로컬에서 `python3 -m http.server -d web 8080` 로도 열립니다.
+2. 그 공개 주소를 `.env` 의 `BRAG_BASE_URL` 에 넣고 봇을 재기동합니다(`docker compose up -d bot`).
+   - 예: `BRAG_BASE_URL=https://run.example.org`
+3. 디스코드에서 `/자랑` → 링크를 열어 배경 사진 선택 → **이미지로 저장**.
+
+> `BRAG_BASE_URL` 을 비워 두면 `/자랑` 은 링크 없이 통계를 텍스트로만 보여줍니다(카드 페이지 없이도 동작).
+> 페이지는 링크로 여는 사람에게만 통계가 보이며, 검색 색인은 `noindex` 로 막혀 있습니다.
 
 ---
 

@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>러닝 스트릭 · 자랑 카드</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --line:#2a313c; --text:#e8edf3; --muted:#9aa6b2;
+    --accent:#ff7a2f; --accent2:#ff3d77;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:-apple-system,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",system-ui,sans-serif;
+    -webkit-text-size-adjust:100%;
+    padding:20px 16px 40px; display:flex; flex-direction:column; align-items:center; gap:18px;
+  }
+  header{width:100%; max-width:440px}
+  header h1{font-size:18px; margin:0 0 2px; font-weight:800}
+  header p{margin:0; color:var(--muted); font-size:13px; line-height:1.5}
+  .stage{width:100%; max-width:440px}
+  canvas#card{
+    width:100%; height:auto; display:block; border-radius:16px;
+    box-shadow:0 10px 40px rgba(0,0,0,.5); background:#203a43;
+  }
+  .controls{width:100%; max-width:440px; display:flex; flex-direction:column; gap:12px}
+  .row{display:flex; gap:10px}
+  label.file, button, input[type=text]{
+    font-family:inherit; font-size:15px; border-radius:12px; border:1px solid var(--line);
+  }
+  label.file{
+    flex:1; background:var(--panel); color:var(--text); padding:13px 14px; text-align:center;
+    cursor:pointer; font-weight:600; user-select:none;
+  }
+  label.file input{display:none}
+  input[type=text]{
+    flex:1; background:var(--panel); color:var(--text); padding:13px 14px; outline:none;
+  }
+  input[type=text]:focus{border-color:var(--accent)}
+  button.save{
+    background:linear-gradient(135deg,var(--accent),var(--accent2)); color:#fff; border:none;
+    padding:15px 14px; font-weight:800; font-size:16px; cursor:pointer; width:100%;
+  }
+  button.save:active{transform:translateY(1px)}
+  .hint{color:var(--muted); font-size:12px; line-height:1.6; margin:0}
+  .hint b{color:#cdd6e0; font-weight:700}
+  .field-label{color:var(--muted); font-size:12px; margin:0 0 -4px 2px}
+</style>
+</head>
+<body>
+  <header>
+    <h1>🏃 러닝 스트릭 자랑 카드</h1>
+    <p>배경 사진을 고르면 기록이 얹힌 카드가 만들어집니다. 저장 버튼으로 이미지를 내려받아 공유하세요.</p>
+  </header>
+
+  <div class="stage">
+    <canvas id="card" width="1080" height="1350"></canvas>
+  </div>
+
+  <div class="controls">
+    <div class="row">
+      <label class="file">📷 배경 사진 선택<input id="photo" type="file" accept="image/*"></label>
+    </div>
+    <p class="field-label">이름 (카드에 표시 · 비워도 됩니다)</p>
+    <div class="row">
+      <input id="name" type="text" maxlength="24" placeholder="이름" autocomplete="off">
+    </div>
+    <button class="save" id="save">🖼️ 이미지로 저장</button>
+    <p class="hint">🔒 <b>사진은 이 기기(브라우저) 안에서만</b> 처리되며 서버로 전송·저장되지 않습니다.
+      기록 수치는 링크의 <b>#</b> 뒤에 담겨 있어 서버로 전송조차 되지 않습니다.</p>
+  </div>
+
+<script>
+(function(){
+  "use strict";
+  var FONT = '-apple-system,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",system-ui,sans-serif';
+  var W = 1080, H = 1350, PAD = 76;
+  var cv = document.getElementById('card');
+  var ctx = cv.getContext('2d');
+  var bgImg = null;
+
+  function fmtDuration(sec){
+    sec = Math.max(0, Math.round(sec || 0));
+    var h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60);
+    return h ? (h + '시간 ' + m + '분') : (m + '분');
+  }
+  function fmtPace(sec){
+    if(!sec) return '—';
+    var p = Math.round(sec);
+    return Math.floor(p/60) + "'" + String(p%60).padStart(2,'0') + '"/km';
+  }
+  function toInt(v){
+    if(v === null || v === '') return null;
+    var n = parseInt(v, 10);
+    return isNaN(n) ? null : n;   // 수기 조작 URL 방어 — 숫자 아니면 미표시(—)
+  }
+
+  // 통계는 프래그먼트(#)에서만 읽는다 — 서버로 전송되지 않는 부분.
+  // location.hash 는 Firefox 가 %-디코드해 돌려주므로(이름의 & = % 가 깨짐), href 에서 원문을 취한다.
+  var q = new URLSearchParams(location.href.split('#')[1] || '');
+  var data = {
+    streak: toInt(q.get('streak')) || 0,
+    tier:   toInt(q.get('tier')) || 0,
+    runs:   toInt(q.get('runs')),
+    dist:   q.get('dist'),                 // "12.34" 형태 문자열 또는 null
+    time:   toInt(q.get('time')),          // 초
+    pace:   toInt(q.get('pace')),          // 초/km
+    name:   q.get('name') || ''
+  };
+
+  function drawCover(img){
+    var ir = img.width/img.height, cr = W/H, dw, dh, dx, dy;
+    if(ir > cr){ dh = H; dw = H*ir; dx = (W-dw)/2; dy = 0; }
+    else { dw = W; dh = W/ir; dx = 0; dy = (H-dh)/2; }
+    ctx.drawImage(img, dx, dy, dw, dh);
+  }
+  function shadowOn(){ ctx.shadowColor='rgba(0,0,0,0.55)'; ctx.shadowBlur=16; ctx.shadowOffsetY=2; }
+  function shadowOff(){ ctx.shadowColor='transparent'; ctx.shadowBlur=0; ctx.shadowOffsetY=0; }
+  function roundRect(x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+  }
+
+  function render(){
+    ctx.clearRect(0,0,W,H);
+
+    // 배경: 사진(cover) 또는 기본 그라디언트
+    if(bgImg){ drawCover(bgImg); }
+    else {
+      var g = ctx.createLinearGradient(0,0,W,H);
+      g.addColorStop(0,'#0f2027'); g.addColorStop(0.5,'#203a43'); g.addColorStop(1,'#2c5364');
+      ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    }
+    // 가독성용 하단/상단 어둡게
+    var sh = ctx.createLinearGradient(0,H*0.30,0,H);
+    sh.addColorStop(0,'rgba(0,0,0,0)'); sh.addColorStop(0.55,'rgba(0,0,0,0.55)'); sh.addColorStop(1,'rgba(0,0,0,0.88)');
+    ctx.fillStyle = sh; ctx.fillRect(0,0,W,H);
+    var tp = ctx.createLinearGradient(0,0,0,H*0.20);
+    tp.addColorStop(0,'rgba(0,0,0,0.40)'); tp.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle = tp; ctx.fillRect(0,0,W,H*0.20);
+
+    // 브랜드 (상단)
+    ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    shadowOn();
+    ctx.fillStyle='rgba(255,255,255,0.92)'; ctx.font='700 34px '+FONT;
+    ctx.fillText('러닝 스트릭', PAD, 92);
+    shadowOff();
+
+    // 링크 없이 직접 열었을 때 안내
+    if(!data.tier){
+      ctx.textAlign='center'; shadowOn();
+      ctx.fillStyle='#fff'; ctx.font='700 46px '+FONT;
+      ctx.fillText('자랑 카드', W/2, H/2-20);
+      ctx.fillStyle='rgba(255,255,255,0.85)'; ctx.font='400 30px '+FONT;
+      ctx.fillText('디스코드에서 /자랑 으로 만든', W/2, H/2+40);
+      ctx.fillText('링크로 열어 주세요.', W/2, H/2+84);
+      shadowOff(); ctx.textAlign='left';
+      return;
+    }
+
+    // MILESTONE 태그(알약)
+    ctx.font='800 26px '+FONT;
+    var tag='MILESTONE', tw=ctx.measureText(tag).width, pillW=tw+52, pillH=52, pillY=H-560;
+    var pg=ctx.createLinearGradient(PAD,0,PAD+pillW,0);
+    pg.addColorStop(0,'#ff7a2f'); pg.addColorStop(1,'#ff3d77');
+    shadowOn(); ctx.fillStyle=pg; roundRect(PAD,pillY,pillW,pillH,pillH/2); ctx.fill(); shadowOff();
+    ctx.fillStyle='#fff'; ctx.textBaseline='middle';
+    ctx.fillText(tag, PAD+26, pillY+pillH/2+1);
+    ctx.textBaseline='alphabetic';
+
+    // 히어로: 큰 숫자 + 단위
+    shadowOn();
+    ctx.fillStyle='#fff'; ctx.font='800 210px '+FONT;
+    var numY=H-330, num=String(data.tier);
+    ctx.fillText(num, PAD-6, numY);
+    var numW=ctx.measureText(num).width;
+    ctx.font='800 62px '+FONT;
+    ctx.fillText('일 연속', PAD-6+numW+22, numY);
+    // "달성"
+    ctx.font='800 66px '+FONT;
+    ctx.fillText('달성 🎉', PAD-4, H-250);
+    shadowOff();
+
+    // 진행 컨텍스트
+    var ctxLine = data.streak + '일째 이어가는 중';
+    if(data.runs) ctxLine += ' · 총 ' + data.runs + '회';
+    shadowOn();
+    ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.font='500 36px '+FONT;
+    ctx.fillText(ctxLine, PAD, H-192);
+    shadowOff();
+
+    // 구분선
+    ctx.strokeStyle='rgba(255,255,255,0.28)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(PAD,H-158); ctx.lineTo(W-PAD,H-158); ctx.stroke();
+
+    // 통계 3열
+    var cells=[
+      {label:'총 거리', value: data.dist!=null ? (data.dist+'km') : '—'},
+      {label:'총 시간', value: data.time!=null ? fmtDuration(data.time) : '—'},
+      {label:'평균 페이스', value: fmtPace(data.pace)}
+    ];
+    var colW=(W-2*PAD)/3;
+    for(var i=0;i<3;i++){
+      var cx=PAD+i*colW;
+      shadowOn();
+      ctx.fillStyle='#ffb27a'; ctx.font='700 26px '+FONT;
+      ctx.fillText(cells[i].label, cx, H-104);
+      ctx.fillStyle='#fff'; ctx.font='800 44px '+FONT;
+      ctx.fillText(cells[i].value, cx, H-56);
+      shadowOff();
+    }
+
+    // 이름 — 좌측 브랜드('러닝 스트릭')와 겹치지 않게 실측 폭 기준으로 자른다.
+    if(data.name){
+      ctx.font='600 34px '+FONT;
+      var nm = data.name, maxW = 660;
+      if(ctx.measureText(nm).width > maxW){
+        while(nm.length > 1 && ctx.measureText(nm + '…').width > maxW) nm = nm.slice(0, -1);
+        nm += '…';
+      }
+      ctx.textAlign='right'; shadowOn();
+      ctx.fillStyle='rgba(255,255,255,0.92)';
+      ctx.fillText(nm, W-PAD, 92);
+      shadowOff(); ctx.textAlign='left';
+    }
+  }
+
+  // 사진 선택 (업로드 아님 — objectURL 로 로컬 처리)
+  document.getElementById('photo').addEventListener('change', function(e){
+    var f = e.target.files && e.target.files[0];
+    if(!f) return;
+    var url = URL.createObjectURL(f);
+    var img = new Image();
+    img.onload = function(){ bgImg = img; render(); URL.revokeObjectURL(url); };
+    img.onerror = function(){ URL.revokeObjectURL(url); alert('이미지를 열 수 없습니다. 다른 사진을 선택해 주세요.'); };
+    img.src = url;
+  });
+
+  // 이름 편집
+  var nameInput = document.getElementById('name');
+  nameInput.value = data.name;
+  nameInput.addEventListener('input', function(){ data.name = nameInput.value; render(); });
+
+  // 저장 (canvas → PNG 다운로드)
+  document.getElementById('save').addEventListener('click', function(){
+    render();
+    cv.toBlob(function(blob){
+      if(!blob){ alert('저장에 실패했습니다.'); return; }
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'running-streak-' + (data.tier||0) + '일.png';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+    }, 'image/png');
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>
