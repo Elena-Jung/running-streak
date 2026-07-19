@@ -37,6 +37,17 @@ services:
         condition: service_healthy
     networks:
       - internal
+    # DNS 고정: 호스트 리졸버(NetworkManager 등)가 네트워크 재접속 때마다 /etc/resolv.conf 를
+    # 다시 쓰는데, 그 전환 구간에 컨테이너가 빈/낡은 업스트림을 물면 discord.com 해석이 실패해
+    # 봇이 게이트웨이에서 끊긴다. 공개 리졸버를 명시해 호스트 리졸버 상태와 분리한다
+    # (이 봇은 공개 도메인만 조회하므로 사설 DNS 가 필요 없다).
+    # 사내/사설 DNS 가 필요한 환경이면 아래를 지우거나 해당 리졸버로 바꾸면 된다.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    dns_opt:
+      - timeout:2
+      - attempts:3
     # 인바운드 포트 없음. 아웃바운드(디스코드)만 사용.
     mem_limit: 1g  # OCR(이미지 변형 다수)로 인한 메모리 폭주 시 호스트 보호
     logging:
