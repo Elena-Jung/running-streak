@@ -48,7 +48,7 @@
 
 4. **OAuth2 → URL Generator**:
    - scopes: `bot`, `applications.commands`
-   - bot permissions: **View Channels**, **Send Messages**, **Read Message History**, **Add Reactions** (이 4개면 충분 — 봇은 '자기 리액션'만 바꾸므로 Manage Messages 는 필요 없습니다)
+   - bot permissions: **View Channels**, **Send Messages**, **Read Message History**, **Add Reactions** (이 4개면 충분 — 봇은 '자기 리액션'만 바꾸므로 Manage Messages 는 필요 없습니다. 단 **음악 기능을 쓸 서버**라면 **Connect**, **Speak** 를 추가하십시오)
    - 생성된 URL 로 **본인 서버에 초대**합니다.
 
    > members 인텐트는 필요하지 않습니다(리더보드 이름은 `fetch_user` 로 조회).
@@ -86,6 +86,7 @@ cp .env.example .env
 - `TZ`, `OCR_ENABLED` — 보통 기본값 유지.
 - `BOT_PAUSED` — 킬스위치. `true` 면 사진 집계를 즉시 중단(조회 커맨드는 동작). 평소 `false`.
 - `BRAG_BASE_URL` — (선택) 마일스톤 자랑 카드(`/자랑`) 페이지 주소. `web/` 을 정적으로 서빙한 주소를 넣습니다(§5.3). 비워 두면 `/자랑` 은 링크 대신 통계 텍스트만 보여줍니다.
+- `MUSIC_GUILD_IDS` — (선택) 음악 기능(`/play`·`/stop`)을 켤 서버 ID 목록(쉼표 구분). **비워 두면 음악 기능은 완전히 꺼집니다.** 러닝 스트릭 서버와 달라도 되고 겹쳐도 됩니다(서버 단위 선별 사용).
 
 > `.env` 는 `.gitignore` 로 보호되어 **절대 커밋되지 않습니다**. 추적 대상은 `.env.example`(플레이스홀더)뿐입니다.
 
@@ -110,8 +111,10 @@ cp .env.example .env
 
 영어 등으로 바꾸려면 다음 문자열을 직접 번역하고 재빌드해야 합니다(작업량이 적지 않습니다):
 
-- `bot/app/commands.py` — `HELP_TEXT`, 모든 `name="..."`/`description="..."`(그룹 `달리기`, 명령 `등록`·`해제`·`취소`·`스트릭`·`기록`·`리더보드`·`캘린더`·`도움`), 모든 응답 문구.
+- `bot/app/cogs/running.py` — 모든 `name="..."`/`description="..."`(그룹 `달리기`, 명령 `등록`·`해제`·`취소`·`스트릭`·`기록`·`리더보드`·`캘린더`·`도움`)와 응답 문구.
+- `bot/app/commands.py` — `HELP_TEXT` 와 표시 포맷 헬퍼.
 - `bot/app/events.py` — 완료 메시지(`### 러닝 기록 완료. N일째 연속입니다.`)와 OCR 소프트 힌트.
+- (음악 기능 사용 시) `bot/app/cogs/music.py` — `/play`·`/stop` 이름·설명·응답 문구.
 
 > 명령 이름을 바꾸면 다음 기동 시 길드 스코프로 재동기화됩니다. Tesseract `kor` 언어팩은 설치돼 있어도 무해합니다.
 

@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from app.config import Config, ConfigError, _env_int
+from app.config import Config, ConfigError, _env_int, _env_int_list
 
 
 def _cfg(**kw):
@@ -49,3 +49,21 @@ def test_env_int_bad_raises_configerror(monkeypatch):
     monkeypatch.setenv("X_PORT", "not-a-number")
     with pytest.raises(ConfigError):
         _env_int("X_PORT", 5432)
+
+
+def test_env_int_list_parses_and_defaults(monkeypatch):
+    # 미설정/빈 값 → 빈 튜플(기능 비활성). 공백·후행 쉼표는 관대하게 무시.
+    monkeypatch.delenv("X_GUILDS", raising=False)
+    assert _env_int_list("X_GUILDS") == ()
+    monkeypatch.setenv("X_GUILDS", "")
+    assert _env_int_list("X_GUILDS") == ()
+    monkeypatch.setenv("X_GUILDS", "111")
+    assert _env_int_list("X_GUILDS") == (111,)
+    monkeypatch.setenv("X_GUILDS", " 111 , 222 ,")
+    assert _env_int_list("X_GUILDS") == (111, 222)
+
+
+def test_env_int_list_bad_raises_configerror(monkeypatch):
+    monkeypatch.setenv("X_GUILDS", "111,abc")
+    with pytest.raises(ConfigError):
+        _env_int_list("X_GUILDS")

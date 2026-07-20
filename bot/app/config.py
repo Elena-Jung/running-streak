@@ -39,6 +39,18 @@ def _env_int(name: str, default: int) -> int:
         raise ConfigError(f"환경변수 {name} 는 정수여야 합니다 (현재값: {raw!r}).") from e
 
 
+def _env_int_list(name: str) -> tuple[int, ...]:
+    """쉼표로 구분된 정수 목록 환경변수. 비어 있으면 빈 튜플(해당 기능 비활성)."""
+    raw = os.environ.get(name, "")
+    items = [s for s in (part.strip() for part in raw.split(",")) if s]
+    try:
+        return tuple(int(s) for s in items)
+    except ValueError as e:
+        raise ConfigError(
+            f"환경변수 {name} 는 쉼표로 구분된 정수 목록이어야 합니다 (현재값: {raw!r})."
+        ) from e
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -52,6 +64,8 @@ class Config:
     discord_token: str = field(repr=False)
     guild_id: int = 0
     target_channel_id: int = 0
+    # 음악 기능을 켤 길드 ID 목록(env MUSIC_GUILD_IDS, 쉼표 구분). 비면 음악 기능 비활성.
+    music_guild_ids: tuple[int, ...] = ()
 
     pg_host: str = "db"
     pg_port: int = 5432
@@ -79,6 +93,7 @@ def load_config() -> Config:
         discord_token=_require("DISCORD_TOKEN"),
         guild_id=_require_int("DISCORD_GUILD_ID"),
         target_channel_id=_require_int("TARGET_CHANNEL_ID"),
+        music_guild_ids=_env_int_list("MUSIC_GUILD_IDS"),
         pg_host=os.environ.get("POSTGRES_HOST", "db").strip() or "db",
         pg_port=_env_int("POSTGRES_PORT", 5432),
         pg_user=_require("POSTGRES_USER"),

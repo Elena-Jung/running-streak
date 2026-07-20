@@ -92,7 +92,7 @@ def extract_distance_km(text: str) -> Decimal | None:
     for m in _FALLBACK_RE.finditer(text):
         e = m.span(1)[1]
         tail = text[e:e + 6].lower()
-        tnorm = tail.replace(" ", "")
+        tnorm = "".join(tail.split())  # 공백·개행 모두 무시 — 줄바꿈 너머의 km/h 도 가드
         # "km/h"(속도)·페이스(/km)·칼로리/케이던스/퍼센트가 뒤따르면 거리 아님.
         if tnorm[:1] == "/" or tnorm.startswith("km/h") or tnorm.startswith("kph"):
             continue
@@ -136,17 +136,28 @@ def extract_pace_sec_per_km(text: str) -> int | None:
     """페이스(초/km). 2:00~30:00/km 범위만 인정.
 
     1) 분'초" 형식(6'00") 우선. 2) 없으면 콜론형 "5:30/km"('/km' 필수).
+    '평균' 이 들어간 줄을 먼저 탐색해 최고/구간 페이스 오채택을 막는다(없으면 전체 탐색 —
+    2단 레이아웃처럼 값·라벨이 줄로 갈리면 평균 줄엔 숫자가 없어 자연히 전체로 폴백).
     """
-    for rgx in (_PACE_RE, _PACE_COLON_RE):
-        for m in rgx.finditer(text):
-            mm = int(m.group(1))
-            ss = int(m.group(2))
-            if ss >= 60:
-                continue
-            sec = mm * 60 + ss
-            if 120 <= sec <= 1800:
-                return sec
-    return None
+
+    def _scan(segment: str) -> int | None:
+        for rgx in (_PACE_RE, _PACE_COLON_RE):
+            for m in rgx.finditer(segment):
+                mm = int(m.group(1))
+                ss = int(m.group(2))
+                if ss >= 60:
+                    continue
+                sec = mm * 60 + ss
+                if 120 <= sec <= 1800:
+                    return sec
+        return None
+
+    avg_lines = "\n".join(ln for ln in text.splitlines() if "평균" in ln)
+    if avg_lines:
+        found = _scan(avg_lines)
+        if found is not None:
+            return found
+    return _scan(text)
 
 
 def extract_calories(text: str) -> int | None:
@@ -195,7 +206,10 @@ def extract_fields(text: str) -> dict:
     """4개 부가정보를 한 번에. 못 찾은 항목은 거리/속력/시간 관계로 역산한다.
 
     역산 원칙(명세 2: OCR 은 부가정보):
-    - **OCR 로 읽은 값은 절대 덮어쓰지 않는다.** 비어 있는(None) 필드만 채운다.
+    - **OCR 로 읽은 값은 원칙적으로 덮어쓰지 않는다**(비어 있는 필드만 채움). 단 하나의 예외 —
+      거리·시간·페이스가 모두 읽혔는데 상호 모순(시간/거리 ↔ 페이스 ±15% 초과)이면, 어느
+      값이 오염인지 판별할 수 없으므로 거리·페이스를 **비운다**(틀린 값을 저장하지 않음).
+      속도가 함께 읽혔다면 아래 역산이 독립 신호로 페이스·거리를 복원한다(0번 검사).
     - 페이스가 없으면 ① 거리·시간(코어)으로 `pace=시간/거리`(가장 정확), 없으면
       ② 속도로 `pace=3600/(km/h)`(폴백). 트레드밀 화면처럼 속도만 있는 경우 대응.
     - 거리 없으면 `시간/페이스`, 시간 없으면 `거리×페이스` 로 채운다.
@@ -207,6 +221,18 @@ def extract_fields(text: str) -> dict:
     pace = extract_pace_sec_per_km(text)
     calories = extract_calories(text)
     speed = extract_speed_kmh(text)  # 역산 입력 전용(반환 dict 에는 넣지 않음)
+
+    # 0) 교차 일관성 검사: 셋 다 읽혔는데 시간/거리가 페이스와 ±15% 넘게 어긋나면
+    #    무엇이 오염인지 화면 단독으론 판별할 수 없다(실사례 두 모드: 화면의 다른 소수가
+    #    거리로 오인식 / 최고 페이스가 평균 페이스로 오채택 — 2026-07-20 민원). 틀린 값을
+    #    저장하기보다 비운다(OCR 은 부가정보, 표시도 결측 허용): 앵커·줄 필터가 가장 견고한
+    #    시간만 남기고 거리·페이스를 버린다. 속도가 함께 읽혔다면 아래 역산이 독립 신호로
+    #    복원한다. 클린 데이터의 오차는 반올림 수준(~0.5%)이라 15% 문턱에 걸리지 않는다.
+    if _ok_distance(distance) and duration and pace:
+        implied = duration / float(distance)
+        if abs(implied - pace) > pace * 0.15:
+            distance = None
+            pace = None
 
     # 1) 페이스 유도(피벗). 코어(거리·시간) 우선, 없으면 속도 폴백.
     if pace is None:

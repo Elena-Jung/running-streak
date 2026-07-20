@@ -112,9 +112,10 @@ def test_distance_derived_from_time_and_pace():
 
 
 def test_distance_ocr_wins_over_derivation():
-    # 거리 OCR 이 잡히면 유도하지 않고 OCR 값을 쓴다.
-    text = "거리 5.00 km\n운동시간 13:00\n평균 페이스 6:30/km"
-    assert extract_fields(text)["distance_km"] == Decimal("5.00")
+    # 거리 OCR 이 잡히고 페이스와 일관(±15% 이내)이면 유도하지 않고 OCR 값을 쓴다
+    # (유도값이면 780/390 = 2.00 이 됐을 것).
+    text = "거리 2.05 km\n운동시간 13:00\n평균 페이스 6:30/km"
+    assert extract_fields(text)["distance_km"] == Decimal("2.05")
 
 
 def test_fields_speed_only_screen_has_no_distance():
@@ -128,6 +129,44 @@ def test_fields_speed_only_screen_has_no_distance():
     assert f["duration_sec"] == 25 * 60
     assert f["pace_sec_per_km"] == 6 * 60
     assert f["calories"] == 200
+
+
+# --- 교차 일관성 검사: 상호 모순 삼중값 처리 -------------------------------
+
+def test_inconsistent_triple_drops_distance_and_pace():
+    # 폴백 거리(단위 비인접 독립 소수)가 화면의 다른 소수를 잡아 페이스와 모순되면,
+    # 무엇이 오염인지 판별 불가 → 틀린 값을 저장하지 않도록 거리·페이스를 비우고
+    # 앵커가 견고한 시간만 남긴다.
+    text = "7.6\n운동시간 32:06\n평균 페이스 7'47\""
+    f = extract_fields(text)
+    assert f["duration_sec"] == 1926
+    assert f["distance_km"] is None
+    assert f["pace_sec_per_km"] is None
+
+
+def test_inconsistent_triple_rescued_by_speed():
+    # 속도가 함께 읽힌 경우엔 독립 신호로 복원: 페이스=3600/속도, 거리=시간/페이스.
+    text = "7.6\n운동시간 32:06\n평균 페이스 7'47\"\n평균 속도 7.7 km/h"
+    f = extract_fields(text)
+    assert f["pace_sec_per_km"] == 468          # round(3600/7.7)
+    assert f["distance_km"] == Decimal("4.12")  # 1926/468 (2자리 반올림)
+
+
+def test_consistent_distance_not_touched():
+    # 일관 범위(±15% 이내)면 OCR 거리를 그대로 둔다(검사 미발동).
+    text = "거리 4.19 km\n운동시간 31:19\n평균 페이스 7'27\""
+    assert extract_fields(text)["distance_km"] == Decimal("4.19")
+
+
+def test_speed_kmh_across_newline_not_distance():
+    # 값과 단위가 줄로 갈린 "7.6\nkm/h" 도 거리로 잡지 않는다(개행 무시 가드).
+    assert extract_distance_km("7.6\nkm/h") is None
+
+
+def test_pace_prefers_average_labeled_line():
+    # 최고 페이스가 먼저 나와도 '평균' 줄의 페이스를 채택(최고 페이스 오채택 방지).
+    text = "최고 페이스 5'28\"\n평균 페이스 6'53\""
+    assert extract_pace_sec_per_km(text) == 6 * 60 + 53
 
 
 # --- 속도(km/h) 파싱: 트레드밀/헬스장 화면 -------------------------------

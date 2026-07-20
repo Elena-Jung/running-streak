@@ -10,6 +10,7 @@
 - **bot** 컨테이너: Python 3.12 + discord.py. 사진 이벤트/슬래시 커맨드 처리.
 - **db** 컨테이너: PostgreSQL 16 (봇 전용, 호스트 포트 미발행 → 기존 호스트 PG와 충돌 없음).
 - 스케줄러 없음. 모든 계산은 **사진 업로드 시점** 또는 **조회 시점**에만.
+- (선택) **음악 기능**: `MUSIC_GUILD_IDS` 에 넣은 서버에만 `/play`·`/stop`(유튜브, yt-dlp) 등록 — 러닝 스트릭과 **서버 단위 선별 사용** 가능. DB 미사용.
 
 ## 스트릭 규칙 (요약)
 
@@ -34,6 +35,13 @@
 
 `/자랑` 은 통계를 URL 조각(`#`)에 담은 정적 카드 페이지([`web/index.html`](web/index.html)) 링크를 돌려줍니다. 이 페이지를 아무 정적 호스트로 서빙하고 그 주소를 `.env` 의 `BRAG_BASE_URL` 에 넣으면 됩니다(미설정 시 링크 대신 통계 텍스트만 표시). 사진은 브라우저 밖으로 나가지 않고, 수치는 서버로 전송되지 않습니다.
 
+### 음악 명령어 (선택 — `MUSIC_GUILD_IDS` 로 켠 서버에만 등록)
+
+| 명령어 | 동작 |
+|--------|------|
+| `/play <검색어·URL>` | 호출자의 음성 채널에 들어가 유튜브 오디오 재생 (재생 중이면 곡 교체) |
+| `/stop` | 재생 중지 + 음성 채널 퇴장 |
+
 ---
 
 ## 셀프 호스팅 (Self-hosting)
@@ -57,7 +65,7 @@
    (이미지 첨부를 읽으려면 필수)
 4. **OAuth2 → URL Generator**:
    - scopes: `bot`, `applications.commands`
-   - bot permissions: `View Channels`, `Send Messages`, `Read Message History`, `Add Reactions`
+   - bot permissions: `View Channels`, `Send Messages`, `Read Message History`, `Add Reactions` (+ 음악 기능을 쓸 서버면 `Connect`, `Speak`)
    - 생성된 URL 을 열어 **봇을 서버에 초대**.
 5. 디스코드 앱: **설정 → 고급 → 개발자 모드** 켜기.
    - 서버 아이콘 우클릭 → **ID 복사** = `DISCORD_GUILD_ID`

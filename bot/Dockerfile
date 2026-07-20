@@ -1,11 +1,12 @@
 FROM python:3.12-slim
 
-# Tesseract(로컬 OCR, kor+eng) 와 시간대 데이터. OCR 은 부가정보용.
+# Tesseract(로컬 OCR, kor+eng)·시간대 데이터·ffmpeg(음악 스트리밍, 의존성으로 libopus 포함).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         tesseract-ocr \
         tesseract-ocr-kor \
         tzdata \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \
